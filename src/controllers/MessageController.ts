@@ -1409,6 +1409,229 @@ const controllerMessage = new Elysia()
       historyChat: t.Optional(t.String())
     })
   })
+  .post('/create-message-gemeni', async ({ body, error }) => {
+
+    const existToken = app.service.swat.verify(body.token)
+
+    if (!existToken) return {
+      status: 400
+    }
+    const getIdUser = app.service.swat.parse(body.token).subject
+
+    const user = await UserModel.findById(getIdUser)
+
+    if (!user) return error(404, 'fail')
+
+    // Lấy bot
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'fail')
+
+    // Chuẩn hoá historyChat: coi chuỗi rỗng hoặc khoảng trắng như không truyền
+    let historyId: string | undefined = (body.historyChat && body.historyChat.trim() !== '') ? body.historyChat.trim() : undefined
+
+    // Nếu hết credit tạo history trước (nếu chưa có) và trả về thông báo hết credit
+    if (user.creditUsed >= user.credit) {
+      if (!historyId) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) historyId = historyCreate._id.toString()
+      }
+
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: historyId
+      })
+
+      return {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: historyId
+      }
+    }
+
+    // ================= Simplified Gemini logic =================
+    // Gom context văn bản: template bot (nếu dùng), tóm tắt file bot, 5 lượt hội thoại gần nhất, nội dung user hiện tại.
+
+    let systemInstruction = ''
+    if (bot.templateMessage?.trim() && !body.historyChat) {
+      systemInstruction = bot.templateMessage
+    }
+
+    // Thu thập nội dung file bot dạng text (PDF/Word/TXT) để thêm vào context (rút gọn tránh vượt token)
+    const botFileSnippets: string[] = []
+    const filesBot = await FileManageModel.find({ bot: bot._id, active: true })
+    for (const f of filesBot) {
+      try {
+        const resp = await imageUrlToBase64(f.url)
+        if (resp.type === 'application/pdf') {
+          // chỉ ghi chú có pdf, tránh gửi full base64
+          botFileSnippets.push(`[PDF]: ${resp.file}`)
+        } else if (resp.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const r = await mammoth.extractRawText({ buffer: resp.content })
+          botFileSnippets.push(r.value.substring(0, 1500))
+        } else if (resp.type === 'text/plain') {
+          const t = resp.content.toString('utf-8')
+          botFileSnippets.push(t.substring(0, 1500))
+        }
+      } catch (err) {
+        app.logger.error(err)
+      }
+    }
+
+    // Lịch sử gần nhất
+    const historyPairs: string[] = []
+    if (historyId) {
+      const lastMessages = await MessageModel.find({ history: historyId, status: { $in: [0,1] }, active: true })
+        .limit(5).sort({ createdAt: -1 })
+      lastMessages.reverse()
+      for (const m of lastMessages) {
+        historyPairs.push(`User: ${m.contentUser}`)
+        historyPairs.push(`Bot: ${m.contentBot}`)
+      }
+    }
+
+    // Nội dung user hiện tại
+    const userPrompt = body.content
+
+    // Nếu có file đính kèm của user (text/word/pdf) rút gọn vào prompt
+    let userFileSnippet = ''
+    if (body.file) {
+      try {
+        const rf = await imageUrlToBase64(body.file)
+        if (rf.type === 'application/pdf') {
+          userFileSnippet = `[User gửi PDF: ${rf.file}]`
+        } else if (rf.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const r = await mammoth.extractRawText({ buffer: rf.content })
+          userFileSnippet = r.value.substring(0, 1500)
+        } else if (rf.type === 'text/plain') {
+          userFileSnippet = rf.content.toString('utf-8').substring(0, 1500)
+        } else if (rf.type.startsWith('image/')) {
+          userFileSnippet = '[User gửi hình ảnh]' // Có thể mở rộng multi-modal sau
+        }
+      } catch (err) {
+        app.logger.error(err)
+      }
+    }
+
+    const aggregateContext = `Thông tin bot:\n${botFileSnippets.join('\n---\n')}\n\nLịch sử gần nhất:\n${historyPairs.join('\n')}\n\nNội dung người dùng hiện tại:\n${userPrompt}\n\nThông tin file người dùng (nếu có):\n${userFileSnippet}`
+
+    // Gemini contents: 1 message user
+    const contents = [
+      { role: 'user', parts: [{ text: aggregateContext }] }
+    ]
+    const completions = await app.service.gemini.models.generateContent({
+      model: body.model,
+      contents,
+      config: systemInstruction ? { systemInstruction } : undefined,
+    })
+    // Trích xuất nội dung trả lời
+    let contentBot = ''
+    if (completions?.candidates && completions.candidates.length > 0) {
+      const parts = completions.candidates[0].content?.parts || []
+      contentBot = parts.map((p: any) => p.text).join('\n')
+    }
+
+    // ================= Pricing (Gemini specific) =================
+    // Pricing table provided by user:
+    // Gemini 2.5 Pro:
+    //  Input  <=200k tokens: $1.25 / 1M  | >200k tokens: $2.50 / 1M
+    //  Output <=200k tokens: $10.00 / 1M | >200k tokens: $15.00 / 1M (output includes thinking tokens)
+    // Gemini 2.5 Flash:
+    //  Input:  $0.30 / 1M
+    //  Output: $2.50 / 1M
+    // Internal credit conversion: multiply USD cost by 5 (same as previous implementation)
+
+    const usagePromptTokens = completions?.usageMetadata?.promptTokenCount || 0
+    const usageOutputTokens = completions?.usageMetadata?.candidatesTokenCount || 0
+
+    const modelName = body.model || 'gemini-2.5-pro'
+    const isFlash = /flash/i.test(modelName)
+
+    // Determine per-million pricing in USD
+    let inputPerMillionUSD: number
+    let outputPerMillionUSD: number
+    if (isFlash) {
+      inputPerMillionUSD = 0.30
+      outputPerMillionUSD = 2.50
+    } else { // Pro tiered
+      inputPerMillionUSD = usagePromptTokens <= 200_000 ? 1.25 : 2.50
+      outputPerMillionUSD = usageOutputTokens <= 200_000 ? 10.00 : 15.00
+    }
+
+    const priceTokenRequest = new Decimal(usagePromptTokens)
+    const priceTokenResponse = new Decimal(usageOutputTokens)
+
+    const costInputUSD = priceTokenRequest.mul(inputPerMillionUSD).div(1_000_000)
+    const costOutputUSD = priceTokenResponse.mul(outputPerMillionUSD).div(1_000_000)
+
+    // Convert to internal credits (x5)
+    const creditCost = costInputUSD.add(costOutputUSD).mul(5)
+
+    // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
+    if (!historyId) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) historyId = historyCreate._id.toString()
+    }
+
+    const messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: contentBot,
+      fileUser: body.file,
+      tookenRequest: priceTokenRequest.toNumber(),
+      tookendResponse: priceTokenResponse.toNumber(),
+      creditCost: creditCost,
+      active: true,
+      status: 0,
+      history: historyId,
+      fileType: body.fileType
+    })
+
+    const creditUsed = new Decimal(user.creditUsed)
+    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+    await user.updateOne({ creditUsed: creditUsedUpdate })
+
+    const messageData = {
+      contentBot: contentBot,
+      createdAt: messageCreated.createdAt,
+      file: body.file,
+      status: messageCreated.status,
+      _id: messageCreated._id,
+      history: historyId
+    }
+
+    app.logger.info(messageData)
+    return messageData
+  }, {
+    body: t.Object({
+      token: t.String(),
+      model: t.String(),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      file: t.Optional(t.String()),
+      fileType: t.Optional(t.String()),
+      historyChat: t.Optional(t.String())
+    })
+  })
   .post('/create-message-mobile-gemini', async ({ body, error }) => {
 
     // Lấy user
@@ -1537,26 +1760,36 @@ const controllerMessage = new Elysia()
       contentBot = parts.map((p: any) => p.text).join('\n')
     }
 
-    // Tính chi phí tương tự OpenAI route
-    let priceTokenRequest = new Decimal(0)
-    let priceTokenResponse = new Decimal(0)
-    const priceTokenInput = new Decimal(0.00000125)
-    const priceTokenOutput = new Decimal(0.00001)
+    // ================= Pricing (Gemini specific) =================
+    // Gemini 2.5 Pro:
+    //  Input  <=200k tokens: $1.25 / 1M  | >200k tokens: $2.50 / 1M
+    //  Output <=200k tokens: $10.00 / 1M | >200k tokens: $15.00 / 1M
+    // Gemini 2.5 Flash:
+    //  Input:  $0.30 / 1M
+    //  Output: $2.50 / 1M
+    // Internal credit conversion: multiply USD cost by 5
 
-    if (completions?.usageMetadata) {
-      if (completions.usageMetadata.promptTokenCount) {
-        priceTokenRequest = new Decimal(completions.usageMetadata.promptTokenCount)
-      }
-      if (completions.usageMetadata.candidatesTokenCount) {
-        priceTokenResponse = new Decimal(completions.usageMetadata.candidatesTokenCount)
-      }
+    const usagePromptTokens = completions?.usageMetadata?.promptTokenCount || 0
+    const usageOutputTokens = completions?.usageMetadata?.candidatesTokenCount || 0
+
+    const modelName = 'gemini-2.5-pro' // fixed for mobile endpoint
+    const isFlash = /flash/i.test(modelName)
+
+    let inputPerMillionUSD: number
+    let outputPerMillionUSD: number
+    if (isFlash) {
+      inputPerMillionUSD = 0.30
+      outputPerMillionUSD = 2.50
+    } else {
+      inputPerMillionUSD = usagePromptTokens <= 200_000 ? 1.25 : 2.50
+      outputPerMillionUSD = usageOutputTokens <= 200_000 ? 10.00 : 15.00
     }
 
-    const totalCostInput = priceTokenRequest.mul(priceTokenInput)
-    const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
-    const totalCostRealInput = totalCostInput.mul(5)
-    const totalCostRealOutput = totalCostOutput.mul(5)
-    const creditCost = totalCostRealInput.add(totalCostRealOutput)
+    const priceTokenRequest = new Decimal(usagePromptTokens)
+    const priceTokenResponse = new Decimal(usageOutputTokens)
+    const costInputUSD = priceTokenRequest.mul(inputPerMillionUSD).div(1_000_000)
+    const costOutputUSD = priceTokenResponse.mul(outputPerMillionUSD).div(1_000_000)
+    const creditCost = costInputUSD.add(costOutputUSD).mul(5)
 
     // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
     if (!historyId) {
