@@ -1419,19 +1419,19 @@ const controllerMessage = new Elysia()
     const bot = await BotModel.findById(body.bot)
     if (!bot) return error(404, 'fail')
 
-    // Hết credit
+    // Chuẩn hoá historyChat: coi chuỗi rỗng hoặc khoảng trắng như không truyền
+    let historyId: string | undefined = (body.historyChat && body.historyChat.trim() !== '') ? body.historyChat.trim() : undefined
+
+    // Nếu hết credit tạo history trước (nếu chưa có) và trả về thông báo hết credit
     if (user.creditUsed >= user.credit) {
-      let history
-      if (!body.historyChat) {
+      if (!historyId) {
         const historyCreate = await HistoryChat.create({
           user: user._id,
           bot: bot._id,
           active: true,
           name: body.content
         })
-        if (historyCreate) history = historyCreate._id.toString()
-      } else {
-        history = body.historyChat
+        if (historyCreate) historyId = historyCreate._id.toString()
       }
 
       const messageCreated = await MessageModel.create({
@@ -1443,7 +1443,7 @@ const controllerMessage = new Elysia()
         tookendResponse: 0,
         creditCost: 0,
         active: true,
-        history: history
+        history: historyId
       })
 
       return {
@@ -1451,7 +1451,7 @@ const controllerMessage = new Elysia()
         createdAt: messageCreated.createdAt,
         _id: messageCreated._id,
         status: messageCreated.status,
-        history: history
+        history: historyId
       }
     }
 
@@ -1486,8 +1486,8 @@ const controllerMessage = new Elysia()
 
     // Lịch sử gần nhất
     const historyPairs: string[] = []
-    if (body.historyChat) {
-      const lastMessages = await MessageModel.find({ history: body.historyChat, status: { $in: [0,1] }, active: true })
+    if (historyId) {
+      const lastMessages = await MessageModel.find({ history: historyId, status: { $in: [0,1] }, active: true })
         .limit(5).sort({ createdAt: -1 })
       lastMessages.reverse()
       for (const m of lastMessages) {
@@ -1525,84 +1525,80 @@ const controllerMessage = new Elysia()
     const contents = [
       { role: 'user', parts: [{ text: aggregateContext }] }
     ]
-    console.log(contents)
     const completions = await app.service.gemini.models.generateContent({
       model: 'gemini-2.5-pro',
       contents,
       config: systemInstruction ? { systemInstruction } : undefined,
     })
-    return completions
-    // // Trích xuất nội dung trả lời
-    // let contentBot = ''
-    // if (completions?.candidates && completions.candidates.length > 0) {
-    //   const parts = completions.candidates[0].content?.parts || []
-    //   contentBot = parts.map((p: any) => p.text).join('\n')
-    // }
+    // Trích xuất nội dung trả lời
+    let contentBot = ''
+    if (completions?.candidates && completions.candidates.length > 0) {
+      const parts = completions.candidates[0].content?.parts || []
+      contentBot = parts.map((p: any) => p.text).join('\n')
+    }
 
-    // // Tính chi phí tương tự OpenAI route
-    // let priceTokenRequest = new Decimal(0)
-    // let priceTokenResponse = new Decimal(0)
-    // const priceTokenInput = new Decimal(0.00000125)
-    // const priceTokenOutput = new Decimal(0.00001)
+    // Tính chi phí tương tự OpenAI route
+    let priceTokenRequest = new Decimal(0)
+    let priceTokenResponse = new Decimal(0)
+    const priceTokenInput = new Decimal(0.00000125)
+    const priceTokenOutput = new Decimal(0.00001)
 
-    // if (completions?.usageMetadata) {
-    //   if (completions.usageMetadata.promptTokenCount) {
-    //     priceTokenRequest = new Decimal(completions.usageMetadata.promptTokenCount)
-    //   }
-    //   if (completions.usageMetadata.candidatesTokenCount) {
-    //     priceTokenResponse = new Decimal(completions.usageMetadata.candidatesTokenCount)
-    //   }
-    // }
+    if (completions?.usageMetadata) {
+      if (completions.usageMetadata.promptTokenCount) {
+        priceTokenRequest = new Decimal(completions.usageMetadata.promptTokenCount)
+      }
+      if (completions.usageMetadata.candidatesTokenCount) {
+        priceTokenResponse = new Decimal(completions.usageMetadata.candidatesTokenCount)
+      }
+    }
 
-    // const totalCostInput = priceTokenRequest.mul(priceTokenInput)
-    // const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
-    // const totalCostRealInput = totalCostInput.mul(5)
-    // const totalCostRealOutput = totalCostOutput.mul(5)
-    // const creditCost = totalCostRealInput.add(totalCostRealOutput)
+    const totalCostInput = priceTokenRequest.mul(priceTokenInput)
+    const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
+    const totalCostRealInput = totalCostInput.mul(5)
+    const totalCostRealOutput = totalCostOutput.mul(5)
+    const creditCost = totalCostRealInput.add(totalCostRealOutput)
 
-    // const messageCreated = await MessageModel.create({
-    //   user: user._id,
-    //   bot: body.bot,
-    //   contentUser: body.content,
-    //   contentBot: contentBot,
-    //   fileUser: body.file,
-    //   tookenRequest: priceTokenRequest.toNumber(),
-    //   tookendResponse: priceTokenResponse.toNumber(),
-    //   creditCost: creditCost,
-    //   active: true,
-    //   status: 0,
-    //   history: body.historyChat,
-    //   fileType: body.fileType
-    // })
+    // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
+    if (!historyId) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) historyId = historyCreate._id.toString()
+    }
 
-    // const creditUsed = new Decimal(user.creditUsed)
-    // const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
-    // await user.updateOne({ creditUsed: creditUsedUpdate })
+    const messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: contentBot,
+      fileUser: body.file,
+      tookenRequest: priceTokenRequest.toNumber(),
+      tookendResponse: priceTokenResponse.toNumber(),
+      creditCost: creditCost,
+      active: true,
+      status: 0,
+      history: historyId,
+      fileType: body.fileType
+    })
 
-    // let history = ''
-    // if (!body.historyChat) {
-    //   const historyCreate = await HistoryChat.create({
-    //     user: user._id,
-    //     bot: bot._id,
-    //     active: true,
-    //     name: body.content
-    //   })
-    //   if (historyCreate) history = historyCreate._id.toString()
-    // } else {
-    //   history = body.historyChat
-    // }
+    const creditUsed = new Decimal(user.creditUsed)
+    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+    await user.updateOne({ creditUsed: creditUsedUpdate })
 
-    // const messageData = {
-    //   contentBot: contentBot,
-    //   createdAt: messageCreated.createdAt,
-    //   file: body.file,
-    //   status: messageCreated.status,
-    //   _id: messageCreated._id,
-    //   history: history
-    // }
+    const messageData = {
+      contentBot: contentBot,
+      createdAt: messageCreated.createdAt,
+      file: body.file,
+      status: messageCreated.status,
+      _id: messageCreated._id,
+      history: historyId
+    }
 
-    // app.logger.info(messageData)
-    // return messageData
+    app.logger.info(messageData)
+    return messageData
   }, {
     body: t.Object({
       id: t.String({ id: idMongodb }),
