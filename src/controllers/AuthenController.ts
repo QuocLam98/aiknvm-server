@@ -293,16 +293,16 @@ const controllerAuthen = new Elysia()
       token: t.String()
     })
   })
-  .put('/delete-user/:id', async ({ params, error }) => {
-    const user = User.findById(params.id)
-
-    if (!user) return error(404, 'false')
-
-    await user.updateOne({
-      active: false
-    })
+  .put('/delete-user/:id', async ({ params, body, error }) => {
+    const user = await User.findById(params.id)
+    if (!user) return error(404, 'not found')
+    await user.updateOne({ active: body.active })
+    return { status: 200, message: 'success', id: params.id, active: body.active }
   }, {
     params: t.Object({ id: idMongodb }),
+    body: t.Object({
+      active: t.Boolean()
+    })
   })
   .get('/list-user', async ({ query }) => {
     const page = query.page ?? 1;
@@ -310,11 +310,8 @@ const controllerAuthen = new Elysia()
     const keyword = query.keyword ?? '';
 
     const skip = (page - 1) * limit;
-
-    // Luôn có điều kiện active: true
-    const filter: Record<string, any> = {
-      active: true
-    };
+    // Bỏ filter cố định active=true theo yêu cầu -> mặc định lấy tất cả
+    const filter: Record<string, any> = {};
 
     // Nếu có keyword thì thêm $or vào filter
     if (keyword) {
@@ -341,6 +338,14 @@ const controllerAuthen = new Elysia()
       limit: t.Optional(t.Number({ minimum: 1, maximum: 50 })),
       keyword: t.Optional(t.String())
     })
+  })
+  // Hard delete user (xóa cứng) thay vì chỉ cập nhật active=false
+  .delete('/hard-delete-user/:id', async ({ params, error }) => {
+    const deleted = await User.findByIdAndDelete(params.id)
+    if (!deleted) return error(404, 'fail')
+    return { status: 200, message: 'deleted', id: params.id }
+  }, {
+    params: t.Object({ id: idMongodb })
   })
   .post('/pay-ment', async ({ body, error }) => {
     const bodyResponse = {
