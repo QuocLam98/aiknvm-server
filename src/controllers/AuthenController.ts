@@ -507,21 +507,16 @@ const controllerAuthen = new Elysia()
         phone: '',
         image: payload.picture
       })
-
       const token = app.service.swat.create(getUser.id, getUser.role, Math.floor(Date.now() / 1000) + 21600)
-      return { message: 'success', status: 200, token: token, email: getUser.email, data: true }
+      return { message: 'success', status: 200, token, email: getUser.email, data: true }
     }
 
-    else if (existUser.active === true) {
-      const token = app.service.swat.create(existUser.id, existUser.role, Math.floor(Date.now() / 1000) + 21600)
-      
-      return { message: 'success', status: 200, token: token, email: existUser.email, data: true }
+    if (existUser.active === false) {
+      return { status: 403, message: 'Tài khoản đã bị vô hiệu hóa' }
     }
 
-    else {
-      const token = app.service.swat.create(existUser.id, existUser.role, Math.floor(Date.now() / 1000) + 21600)
-      return { message: 'success', status: 200, token: token, email: existUser.email, data: true }
-    }
+    const token = app.service.swat.create(existUser.id, existUser.role, Math.floor(Date.now() / 1000) + 21600)
+    return { message: 'success', status: 200, token, email: existUser.email, data: true }
 
   }, {
     body: t.Object({
@@ -660,6 +655,8 @@ const controllerAuthen = new Elysia()
         credit: 1,
         phone: ''
       })
+    } else if (user.active === false) {
+      return { status: 403, message: 'Tài khoản đã bị vô hiệu hóa' }
     }
 
     const exp = Math.floor(Date.now() / 1000) + 21600 // 6h
