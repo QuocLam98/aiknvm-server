@@ -1923,7 +1923,7 @@ const controllerMessage = new Elysia()
   .post('/gemini-test', async () => {
     const completions = await app.service.gemini.models.generateContent({
       model: 'gemini-2.5-pro',
-      contents: "xin chào"
+      contents: "xin chào1"
     })
     if (completions.candidates && completions.candidates.length > 0)
     {
