@@ -13,6 +13,7 @@ import FileUserManage from '~/models/FileUserManage'
 import { parseBuffer } from 'music-metadata';
 import HistoryChat from '~/models/HistoryChat'
 import LoggerProvider from '~/providers/LoggerProvider'
+import { prepareGeminiInput, computeGeminiPricing } from '~/services/GeminiHelper'
 
 const idMongodb = t.String({ format: 'regex', pattern: '[0-9a-f]{24}$' })
 
@@ -1462,123 +1463,32 @@ const controllerMessage = new Elysia()
       }
     }
 
-    // ================= Simplified Gemini logic =================
-    // Gom context văn bản: template bot (nếu dùng), tóm tắt file bot, 5 lượt hội thoại gần nhất, nội dung user hiện tại.
+    // ==== Gemini (refactored) build input & generate =====
+    const includeTemplate = !!(bot.templateMessage?.trim()) && !body.historyChat
+    const prepared = await prepareGeminiInput({
+      app,
+      bot,
+      historyId,
+      userPrompt: body.content,
+      fileUrl: body.file,
+      includeTemplate,
+      MessageModel
+    })
 
-    let systemInstruction = ''
-    if (bot.templateMessage?.trim() && !body.historyChat) {
-      systemInstruction = bot.templateMessage
-    }
-
-    // Thu thập nội dung file bot dạng text (PDF/Word/TXT) để thêm vào context (rút gọn tránh vượt token)
-    const botFileSnippets: string[] = []
-    const filesBot = await FileManageModel.find({ bot: bot._id, active: true })
-    for (const f of filesBot) {
-      try {
-        const resp = await imageUrlToBase64(f.url)
-        if (resp.type === 'application/pdf') {
-          // chỉ ghi chú có pdf, tránh gửi full base64
-          botFileSnippets.push(`[PDF]: ${resp.file}`)
-        } else if (resp.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          const r = await mammoth.extractRawText({ buffer: resp.content })
-          botFileSnippets.push(r.value.substring(0, 1500))
-        } else if (resp.type === 'text/plain') {
-          const t = resp.content.toString('utf-8')
-          botFileSnippets.push(t.substring(0, 1500))
-        }
-      } catch (err) {
-        app.logger.error(err)
-      }
-    }
-
-    // Lịch sử gần nhất
-    const historyPairs: string[] = []
-    if (historyId) {
-      const lastMessages = await MessageModel.find({ history: historyId, status: { $in: [0,1] }, active: true })
-        .limit(5).sort({ createdAt: -1 })
-      lastMessages.reverse()
-      for (const m of lastMessages) {
-        historyPairs.push(`User: ${m.contentUser}`)
-        historyPairs.push(`Bot: ${m.contentBot}`)
-      }
-    }
-
-    // Nội dung user hiện tại
-    const userPrompt = body.content
-
-    // Nếu có file đính kèm của user (text/word/pdf) rút gọn vào prompt
-    let userFileSnippet = ''
-    if (body.file) {
-      try {
-        const rf = await imageUrlToBase64(body.file)
-        if (rf.type === 'application/pdf') {
-          userFileSnippet = `[User gửi PDF: ${rf.file}]`
-        } else if (rf.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          const r = await mammoth.extractRawText({ buffer: rf.content })
-          userFileSnippet = r.value.substring(0, 1500)
-        } else if (rf.type === 'text/plain') {
-          userFileSnippet = rf.content.toString('utf-8').substring(0, 1500)
-        } else if (rf.type.startsWith('image/')) {
-          userFileSnippet = '[User gửi hình ảnh]' // Có thể mở rộng multi-modal sau
-        }
-      } catch (err) {
-        app.logger.error(err)
-      }
-    }
-
-    const aggregateContext = `Thông tin bot:\n${botFileSnippets.join('\n---\n')}\n\nLịch sử gần nhất:\n${historyPairs.join('\n')}\n\nNội dung người dùng hiện tại:\n${userPrompt}\n\nThông tin file người dùng (nếu có):\n${userFileSnippet}`
-
-    // Gemini contents: 1 message user
-    const contents = [
-      { role: 'user', parts: [{ text: aggregateContext }] }
-    ]
     const completions = await app.service.gemini.models.generateContent({
       model: body.model,
-      contents,
-      config: systemInstruction ? { systemInstruction } : undefined,
+      contents: prepared.contents,
+      config: includeTemplate ? { systemInstruction: bot.templateMessage } : undefined,
     })
-    // Trích xuất nội dung trả lời
+
     let contentBot = ''
-    if (completions?.candidates && completions.candidates.length > 0) {
+    if (completions?.candidates?.length) {
       const parts = completions.candidates[0].content?.parts || []
       contentBot = parts.map((p: any) => p.text).join('\n')
     }
 
-    // ================= Pricing (Gemini specific) =================
-    // Pricing table provided by user:
-    // Gemini 2.5 Pro:
-    //  Input  <=200k tokens: $1.25 / 1M  | >200k tokens: $2.50 / 1M
-    //  Output <=200k tokens: $10.00 / 1M | >200k tokens: $15.00 / 1M (output includes thinking tokens)
-    // Gemini 2.5 Flash:
-    //  Input:  $0.30 / 1M
-    //  Output: $2.50 / 1M
-    // Internal credit conversion: multiply USD cost by 5 (same as previous implementation)
-
-    const usagePromptTokens = completions?.usageMetadata?.promptTokenCount || 0
-    const usageOutputTokens = completions?.usageMetadata?.candidatesTokenCount || 0
-
-    const modelName = body.model || 'gemini-2.5-pro'
-    const isFlash = /flash/i.test(modelName)
-
-    // Determine per-million pricing in USD
-    let inputPerMillionUSD: number
-    let outputPerMillionUSD: number
-    if (isFlash) {
-      inputPerMillionUSD = 0.30
-      outputPerMillionUSD = 2.50
-    } else { // Pro tiered
-      inputPerMillionUSD = usagePromptTokens <= 200_000 ? 1.25 : 2.50
-      outputPerMillionUSD = usageOutputTokens <= 200_000 ? 10.00 : 15.00
-    }
-
-    const priceTokenRequest = new Decimal(usagePromptTokens)
-    const priceTokenResponse = new Decimal(usageOutputTokens)
-
-    const costInputUSD = priceTokenRequest.mul(inputPerMillionUSD).div(1_000_000)
-    const costOutputUSD = priceTokenResponse.mul(outputPerMillionUSD).div(1_000_000)
-
-    // Convert to internal credits (x5)
-    const creditCost = costInputUSD.add(costOutputUSD).mul(5)
+    // Pricing using helper
+    const pricing = computeGeminiPricing(completions?.usageMetadata, body.model)
 
     // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
     if (!historyId) {
@@ -1597,9 +1507,9 @@ const controllerMessage = new Elysia()
       contentUser: body.content,
       contentBot: contentBot,
       fileUser: body.file,
-      tookenRequest: priceTokenRequest.toNumber(),
-      tookendResponse: priceTokenResponse.toNumber(),
-      creditCost: creditCost,
+      tookenRequest: pricing.promptTokens,
+      tookendResponse: pricing.outputTokens,
+      creditCost: pricing.creditCost.toNumber(),
       active: true,
       status: 0,
       history: historyId,
@@ -1607,7 +1517,7 @@ const controllerMessage = new Elysia()
     })
 
     const creditUsed = new Decimal(user.creditUsed)
-    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+  const creditUsedUpdate = creditUsed.add(new Decimal(messageCreated.creditCost))
     await user.updateOne({ creditUsed: creditUsedUpdate })
 
     const messageData = {
@@ -1678,118 +1588,32 @@ const controllerMessage = new Elysia()
       }
     }
 
-    // ================= Simplified Gemini logic =================
-    // Gom context văn bản: template bot (nếu dùng), tóm tắt file bot, 5 lượt hội thoại gần nhất, nội dung user hiện tại.
-
-    let systemInstruction = ''
-    if (bot.templateMessage?.trim() && !body.historyChat) {
-      systemInstruction = bot.templateMessage
-    }
-
-    // Thu thập nội dung file bot dạng text (PDF/Word/TXT) để thêm vào context (rút gọn tránh vượt token)
-    const botFileSnippets: string[] = []
-    const filesBot = await FileManageModel.find({ bot: bot._id, active: true })
-    for (const f of filesBot) {
-      try {
-        const resp = await imageUrlToBase64(f.url)
-        if (resp.type === 'application/pdf') {
-          // chỉ ghi chú có pdf, tránh gửi full base64
-          botFileSnippets.push(`[PDF]: ${resp.file}`)
-        } else if (resp.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          const r = await mammoth.extractRawText({ buffer: resp.content })
-          botFileSnippets.push(r.value.substring(0, 1500))
-        } else if (resp.type === 'text/plain') {
-          const t = resp.content.toString('utf-8')
-          botFileSnippets.push(t.substring(0, 1500))
-        }
-      } catch (err) {
-        app.logger.error(err)
-      }
-    }
-
-    // Lịch sử gần nhất
-    const historyPairs: string[] = []
-    if (historyId) {
-      const lastMessages = await MessageModel.find({ history: historyId, status: { $in: [0,1] }, active: true })
-        .limit(5).sort({ createdAt: -1 })
-      lastMessages.reverse()
-      for (const m of lastMessages) {
-        historyPairs.push(`User: ${m.contentUser}`)
-        historyPairs.push(`Bot: ${m.contentBot}`)
-      }
-    }
-
-    // Nội dung user hiện tại
-    const userPrompt = body.content
-
-    // Nếu có file đính kèm của user (text/word/pdf) rút gọn vào prompt
-    let userFileSnippet = ''
-    if (body.file) {
-      try {
-        const rf = await imageUrlToBase64(body.file)
-        if (rf.type === 'application/pdf') {
-          userFileSnippet = `[User gửi PDF: ${rf.file}]`
-        } else if (rf.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          const r = await mammoth.extractRawText({ buffer: rf.content })
-          userFileSnippet = r.value.substring(0, 1500)
-        } else if (rf.type === 'text/plain') {
-          userFileSnippet = rf.content.toString('utf-8').substring(0, 1500)
-        } else if (rf.type.startsWith('image/')) {
-          userFileSnippet = '[User gửi hình ảnh]' // Có thể mở rộng multi-modal sau
-        }
-      } catch (err) {
-        app.logger.error(err)
-      }
-    }
-
-    const aggregateContext = `Thông tin bot:\n${botFileSnippets.join('\n---\n')}\n\nLịch sử gần nhất:\n${historyPairs.join('\n')}\n\nNội dung người dùng hiện tại:\n${userPrompt}\n\nThông tin file người dùng (nếu có):\n${userFileSnippet}`
-
-    // Gemini contents: 1 message user
-    const contents = [
-      { role: 'user', parts: [{ text: aggregateContext }] }
-    ]
-    const completions = await app.service.gemini.models.generateContent({
-      model: 'gemini-2.5-pro',
-      contents,
-      config: systemInstruction ? { systemInstruction } : undefined,
+    // ==== Gemini (refactored) build input & generate (mobile) =====
+    const includeTemplateMobile = !!(bot.templateMessage?.trim()) && !body.historyChat
+    const preparedMobile = await prepareGeminiInput({
+      app,
+      bot,
+      historyId,
+      userPrompt: body.content,
+      fileUrl: body.file,
+      includeTemplate: includeTemplateMobile,
+      MessageModel
     })
-    // Trích xuất nội dung trả lời
+
+    const modelRequested = body.model || 'gemini-2.5-pro'
+    const completions = await app.service.gemini.models.generateContent({
+      model: modelRequested,
+      contents: preparedMobile.contents,
+      config: includeTemplateMobile ? { systemInstruction: bot.templateMessage } : undefined,
+    })
+
     let contentBot = ''
-    if (completions?.candidates && completions.candidates.length > 0) {
+    if (completions?.candidates?.length) {
       const parts = completions.candidates[0].content?.parts || []
       contentBot = parts.map((p: any) => p.text).join('\n')
     }
 
-    // ================= Pricing (Gemini specific) =================
-    // Gemini 2.5 Pro:
-    //  Input  <=200k tokens: $1.25 / 1M  | >200k tokens: $2.50 / 1M
-    //  Output <=200k tokens: $10.00 / 1M | >200k tokens: $15.00 / 1M
-    // Gemini 2.5 Flash:
-    //  Input:  $0.30 / 1M
-    //  Output: $2.50 / 1M
-    // Internal credit conversion: multiply USD cost by 5
-
-    const usagePromptTokens = completions?.usageMetadata?.promptTokenCount || 0
-    const usageOutputTokens = completions?.usageMetadata?.candidatesTokenCount || 0
-
-    const modelName = 'gemini-2.5-pro' // fixed for mobile endpoint
-    const isFlash = /flash/i.test(modelName)
-
-    let inputPerMillionUSD: number
-    let outputPerMillionUSD: number
-    if (isFlash) {
-      inputPerMillionUSD = 0.30
-      outputPerMillionUSD = 2.50
-    } else {
-      inputPerMillionUSD = usagePromptTokens <= 200_000 ? 1.25 : 2.50
-      outputPerMillionUSD = usageOutputTokens <= 200_000 ? 10.00 : 15.00
-    }
-
-    const priceTokenRequest = new Decimal(usagePromptTokens)
-    const priceTokenResponse = new Decimal(usageOutputTokens)
-    const costInputUSD = priceTokenRequest.mul(inputPerMillionUSD).div(1_000_000)
-    const costOutputUSD = priceTokenResponse.mul(outputPerMillionUSD).div(1_000_000)
-    const creditCost = costInputUSD.add(costOutputUSD).mul(5)
+    const pricing = computeGeminiPricing(completions?.usageMetadata, modelRequested)
 
     // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
     if (!historyId) {
@@ -1808,9 +1632,9 @@ const controllerMessage = new Elysia()
       contentUser: body.content,
       contentBot: contentBot,
       fileUser: body.file,
-      tookenRequest: priceTokenRequest.toNumber(),
-      tookendResponse: priceTokenResponse.toNumber(),
-      creditCost: creditCost,
+      tookenRequest: pricing.promptTokens,
+      tookendResponse: pricing.outputTokens,
+      creditCost: pricing.creditCost.toNumber(),
       active: true,
       status: 0,
       history: historyId,
@@ -1818,7 +1642,7 @@ const controllerMessage = new Elysia()
     })
 
     const creditUsed = new Decimal(user.creditUsed)
-    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+  const creditUsedUpdate = creditUsed.add(new Decimal(messageCreated.creditCost))
     await user.updateOne({ creditUsed: creditUsedUpdate })
 
     const messageData = {
@@ -1836,6 +1660,7 @@ const controllerMessage = new Elysia()
     body: t.Object({
       id: t.String({ id: idMongodb }),
       bot: t.String({ bot: idMongodb }),
+      model: t.String(),
       content: t.String(),
       file: t.Optional(t.String()),
       fileType: t.Optional(t.String()),
