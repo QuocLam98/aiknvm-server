@@ -1,0 +1,1966 @@
+import Elysia, { t } from 'elysia'
+import UserModel from '../models/UserModel'
+import BotModel from '../models/BotModel'
+import MessageModel from '../models/MessageModel'
+import app from '~/app'
+import Decimal from 'decimal.js'
+import UseBotModel from '~/models/UseBotModel'
+import calculateCost from '~/services/CalcService'
+import FileManageModel from '~/models/FileManageModel'
+import imageUrlToBase64 from '~/services/Base64'
+import mammoth from 'mammoth'
+import FileUserManage from '~/models/FileUserManage'
+import { parseBuffer } from 'music-metadata';
+import HistoryChat from '~/models/HistoryChat'
+import LoggerProvider from '~/providers/LoggerProvider'
+
+const idMongodb = t.String({ format: 'regex', pattern: '[0-9a-f]{24}$' })
+
+const controllerMessage = new Elysia()
+  .get('/list-message', async ({ query }) => {
+    const page = query.page ?? 1
+    const limit = query.limit ?? 10
+    const search = query.search?.trim() || ''  // Lấy giá trị tìm kiếm
+    const skip = (page - 1) * limit
+
+    // Tạo biểu thức chính quy cho tìm kiếm
+    const searchRegex = new RegExp(search, 'i')
+
+    const filter: Record<string, any> = {
+      active: true
+    };
+
+    if (search) {
+      // Tìm kiếm user.name và bot.name thông qua populate
+      filter.$or = [
+        { 'user.name': searchRegex },  // Tìm kiếm theo user.name
+        { 'bot.name': searchRegex }    // Tìm kiếm theo bot.name
+      ]
+    }
+
+    const [messages, total] = await Promise.all([
+      MessageModel.find(filter)  // Lọc dữ liệu theo filter
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .populate('user', ['name'])  // Populate thông tin user (chỉ lấy tên)
+        .populate('bot', ['name']), // Populate thông tin bot (chỉ lấy tên)
+      MessageModel.countDocuments(filter)  // Đếm số lượng tài liệu phù hợp với filter
+    ])
+
+    return {
+      message: 'success',
+      status: 200,
+      data: messages,
+      total
+    }
+  }, {
+    query: t.Object({
+      page: t.Optional(t.Number({ minimum: 1 })),
+      limit: t.Optional(t.Number({ minimum: 1, maximum: 50 })),
+      search: t.Optional(t.String())  // Chỉ cần một tham số search duy nhất
+    })
+  })
+  .get('/list-message-mobile', async ({ query }) => {
+    // Ép kiểu + giới hạn an toàn
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const [messages, total] = await Promise.all([
+      MessageModel.find({history: query.id, active: true})
+        .sort({ createdAt: -1 }) // mới nhất trước; đổi { createdAt: 1 } nếu muốn cũ -> mới
+        .skip(skip)
+        .limit(limit)
+        .select('-__v')          // bỏ __v cho gọn (tuỳ chọn)
+        .lean(),                 // trả về plain object cho nhanh
+      MessageModel.countDocuments({}),
+    ]);
+
+    return {
+      message: 'success',
+      status: 200,
+      data: messages,
+      total,
+      meta: {
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+        hasNext: skip + messages.length < total,
+        hasPrev: page > 1,
+      },
+    };
+  }, {
+    query: t.Object({
+      page: t.Optional(t.Number({ minimum: 1 })),
+      limit: t.Optional(t.Number({ minimum: 1, maximum: 50 })),
+      id: t.String()
+    })
+  })
+  .get('/list-message-history/:id', async ({ params }) => {
+
+    const messages = await MessageModel.find({ history: params.id, active: true }).limit(50).sort({ createdAt: -1 })
+
+    return messages
+  }, {
+    params: t.Object({ id: idMongodb })
+  })
+  .post('/upload-file-chat', async ({ body }) => {
+    const fileName = body.file.name.replace(/\s+/g, '')
+    const convertFileName = "File-Chat/" + Date.now() + fileName
+    const file = app.service.client.file(convertFileName)
+    const fileBuffer = await body.file.arrayBuffer()
+
+    await file.write(Buffer.from(fileBuffer), {
+      acl: "public-read",
+      type: body.file.type
+    })
+
+    const uploadFile = app.service.getUrl + convertFileName
+
+    return uploadFile;
+  }, {
+    body: t.Object({
+      file: t.File(),
+    })
+  })
+  .post('/create-message', async ({ body, error }) => {
+    const existToken = app.service.swat.verify(body.token)
+
+    if (!existToken) return {
+      status: 400
+    }
+    const getIdUser = app.service.swat.parse(body.token).subject
+
+    const user = await UserModel.findById(getIdUser)
+
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+
+    if (!bot) return error(404, 'fail')
+
+    if (user.creditUsed >= user.credit) {
+      let history
+
+      if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: history
+      })
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: history
+      }
+      app.logger.info(messageData)
+      return messageData
+    }
+
+    // const useBot = await UseBotModel.findOne({ bot: bot._id, user: user._id })
+
+    const messages: any[] = []
+
+    const messageUsser = {
+      role: 'user',
+      content: body.content,
+    }
+
+    if (bot.templateMessage?.trim()) {
+      if (!body.historyChat) {
+        const messageDeveloper = {
+          role: 'developer',
+          content: bot.templateMessage,
+        }
+        messages.push(messageDeveloper)
+      }
+    }
+
+    // if (useBot) {
+    //   const messageDeveloperUse = {
+    //     role: 'developer',
+    //     content: useBot.templateMessage,
+    //   }
+
+    //   messages.push(messageDeveloperUse)
+    // }
+
+    const getFile = await FileManageModel.find({ bot: bot._id, active: true })
+
+    if (getFile.length > 0) {
+      for (const e of getFile) {
+        const response = await imageUrlToBase64(e.url)
+        // Kiểm tra loại file và xử lý riêng
+        if (response.type === 'application/pdf') {
+          const dataString = Buffer.from(response.content).toString('base64');
+          const mimeType = response.type; // ví dụ: application/pdf
+          const dataUrl = `data:${mimeType};base64,${dataString}`;
+          const pdf = {
+            role: "user",
+            content: [
+              {
+                type: "file",
+                file: {
+                  filename: response.file,
+                  file_data: dataUrl
+                }
+              },
+              {
+                type: "text",
+                text: body.content
+              }
+            ]
+          }
+          messages.push(pdf)
+        } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const result = await mammoth.extractRawText({ buffer: response.content });
+
+          const wordMessage = {
+            role: "developer",
+            content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp: " + result.value
+          }
+          messages.push(wordMessage)
+        } else if (response.type === 'text/plain') {
+          const textContent = response.content.toString('utf-8')
+          const txtMessage = {
+            role: "developer",
+            content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp:" + textContent
+          };
+          messages.push(txtMessage);
+        }
+      }
+    }
+
+    // const getFileUser = await FileUserManage.find({ bot: bot._id, active: true, user: user._id })
+
+    // if (getFileUser.length > 0) {
+    //   for (const e of getFileUser) {
+    //     const response = await imageUrlToBase64(e.url)
+    //     // Kiểm tra loại file và xử lý riêng
+    //     if (response.type === 'application/pdf') {
+    //       const dataString = Buffer.from(response.content).toString('base64')
+    //       const mimeType = response.type; // ví dụ: application/pdf
+    //       const dataUrl = `data:${mimeType};base64,${dataString}`
+    //       const pdf = {
+    //         role: "developer",
+    //         content: [
+    //           {
+    //             type: "file",
+    //             file: {
+    //               filename: response.file,
+    //               file_data: dataUrl
+    //             }
+    //           },
+    //           {
+    //             type: "text",
+    //             text: "Tham khảo qua nội dung trong file để đưa ra câu trả lời phù hợp"
+    //           }
+    //         ]
+    //       }
+    //       messages.push(pdf)
+    //     } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    //       const result = await mammoth.extractRawText({ buffer: response.content });
+
+    //       const wordMessage = {
+    //         role: "developer",
+    //         content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp: " + result.value
+    //       }
+    //       messages.push(wordMessage)
+    //     } else if (response.type === 'text/plain') {
+    //       const textContent = response.content.toString('utf-8')
+    //       const txtMessage = {
+    //         role: "developer",
+    //         content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp:" + textContent
+    //       };
+    //       messages.push(txtMessage);
+    //     }
+    //   }
+    // }
+
+    if (body.historyChat) {
+      const listMessage = await MessageModel.find({
+        history: body.historyChat, status: { $in: [0, 1] }, active: true
+      }).limit(5).sort({ createdAt: -1 })
+
+      if (listMessage.length > 0) {
+        listMessage.reverse();
+        for (const message of listMessage) {
+          if (message.fileUser && message.fileUser.trim() !== '') {
+            const response = await imageUrlToBase64(message.fileUser)
+
+            if (response.type === 'application/pdf') {
+              const dataString = Buffer.from(response.content).toString('base64')
+              const mimeType = response.type;
+              const dataUrl = `data:${mimeType};base64,${dataString}`
+              messages.push({
+                role: "user",
+                content: [
+                  {
+                    type: "file",
+                    file: {
+                      filename: response.file,
+                      file_data: dataUrl
+                    }
+                  },
+                  {
+                    type: "text",
+                    text: message.contentUser
+                  }]
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+            } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+              const result = await mammoth.extractRawText({ buffer: response.content });
+
+              messages.push({
+                role: "user",
+                content: message.contentUser + ": " + result.value
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+            } else if (response.type === 'text/plain') {
+              const textContent = response.content.toString('utf-8')
+              messages.push({
+                role: "user",
+                content: message.contentUser + ": " + textContent
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+
+            } else if (response.type.startsWith('image/')) {
+              const base64Image = response.content.toString('base64');
+              messages.push({
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: message.contentUser
+                  },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:${response.type};base64,${base64Image}`
+                    }
+                  }
+                ]
+              });
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              });
+            }
+          } else {
+            messages.push({
+              role: 'user',
+              content: message.contentUser,
+            }, {
+              role: 'assistant',
+              content: message.contentBot,
+            });
+          }
+        }
+      }
+
+    }
+
+    if (body.file) {
+      if (body.fileType?.startsWith('image/')) {
+        const imageMessage = {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: body.content
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: body.file
+              }
+            }
+          ]
+        };
+
+        messages.push(imageMessage)
+      }
+      else {
+        const response = await imageUrlToBase64(body.file)
+        if (response.type === 'application/pdf') {
+          const dataString = Buffer.from(response.content).toString('base64');
+          const mimeType = body.fileType; // ví dụ: application/pdf
+          const dataUrl = `data:${mimeType};base64,${dataString}`;
+          const pdf = {
+            role: "user",
+            content: [
+              {
+                type: "file",
+                file: {
+                  filename: response.file,
+                  file_data: dataUrl
+                }
+              },
+              {
+                type: "text",
+                text: body.content
+              }
+            ]
+          }
+          messages.push(pdf)
+        } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const result = await mammoth.extractRawText({ buffer: response.content });
+
+          const wordMessage = {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: result.value,  // Gửi văn bản thuần lên OpenAI
+              },
+              {
+                type: "text",
+                text: body.content,  // Gửi văn bản thuần lên OpenAI
+              },
+            ],
+          };
+          messages.push(wordMessage);
+        } else if (response.type === 'text/plain') {
+          const textContent = response.content.toString('utf-8')
+          const txtMessage = {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: textContent,  // Gửi văn bản thuần lên OpenAI
+              },
+              {
+                type: "text",
+                text: body.content,  // Gửi văn bản thuần lên OpenAI
+              },
+            ],
+          };
+          messages.push(txtMessage);
+        }
+      }
+    }
+    else {
+      messages.push(messageUsser)
+    }
+
+    const completions = await app.service.openai.chat.completions.create({
+      model: 'gpt-5',
+      store: true,
+      messages: messages
+    })
+
+    app.logger.info(completions)
+
+    let priceTokenRequest = new Decimal(0)
+    let priceTokenResponse = new Decimal(0)
+    const priceTokenInput = new Decimal(0.00000125)
+    const priceTokenOutput = new Decimal(0.00001)
+
+    if (completions.usage !== undefined && completions.usage !== null) {
+      priceTokenRequest = new Decimal(completions.usage.prompt_tokens);
+      priceTokenResponse = new Decimal(completions.usage.completion_tokens);
+    }
+
+
+    const totalCostInput = priceTokenRequest.mul(priceTokenInput)
+    const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
+
+
+    const totalCostRealInput = totalCostInput.mul(5)
+    const totalCostRealOutput = totalCostOutput.mul(5)
+
+    const messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: completions.choices[0].message.content,
+      fileUser: body.file,
+      tookenRequest: completions.usage?.prompt_tokens,
+      tookendResponse: completions.usage?.completion_tokens,
+      creditCost: totalCostRealInput.add(totalCostRealOutput),
+      active: true,
+      status: 0,
+      history: body.historyChat,
+      fileType: body.fileType
+    })
+
+    const creditUsed = new Decimal(user.creditUsed)
+    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+
+    await user.updateOne({
+      creditUsed: creditUsedUpdate,
+    })
+
+    let history = ''
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    const messageData = {
+      contentBot: completions.choices[0].message.content,
+      createdAt: messageCreated.createdAt,
+      file: body.file,
+      status: messageCreated.status,
+      _id: messageCreated._id,
+      history: history
+    }
+
+    app.logger.info(messageData)
+    return messageData
+
+  }, {
+    body: t.Object({
+      token: t.String(),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      file: t.Optional(t.String()),
+      fileType: t.Optional(t.String()),
+      historyChat: t.Optional(t.String())
+    })
+  })
+  .post('/create-message-image', async ({ body, error }) => {
+
+    const existToken = app.service.swat.verify(body.token)
+
+    if (!existToken) return {
+      status: 400
+    }
+    const getIdUser = app.service.swat.parse(body.token).subject
+    const user = await UserModel.findById(getIdUser)
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'Bot not found')
+
+    if (user.creditUsed >= user.credit) {
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: body.historyChat
+      })
+      let history
+      if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: history
+      }
+
+      return messageData
+    }
+
+    const completions = await app.service.openai.images.generate({
+      model: "dall-e-3",
+      prompt: body.content,
+      size: "1024x1024",
+      response_format: 'b64_json'
+    })
+
+    if (!completions.data) return error(404, 'fail')
+
+    // Bước 1: Lấy base64
+    const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
+    if (!base64Data) return error(404, 'fail')
+    // Bước 2: Convert base64 thành buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Bước 3: Đặt tên file (ví dụ .png vì OpenAI image thường là PNG)
+    const convertFileName = "File-Chat/" + `${Date.now()}.png`;
+
+    // Bước 4: Upload lên S3
+    const file = app.service.client.file(convertFileName);
+
+    await file.write(buffer, {
+      acl: "public-read",
+      type: "image/png" // cố định vì OpenAI đang trả PNG
+    });
+    // Bước 5: Lấy URL
+    const uploadFile = app.service.getUrl + convertFileName;
+    // Tính toán chi phí credit
+    let costImage
+    let creditCost
+    costImage = new Decimal(0.04)
+    creditCost = costImage.mul(5);
+
+    // Chuyển creditCost thành Decimal nếu cần
+    const creditCostDecimal = new Decimal(creditCost);
+
+    // Tạo tin nhắn
+    let messageCreated
+    let uploadFileUser
+
+    messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: uploadFile,
+      tookenRequest: 0,
+      tookendResponse: 0,
+      creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+      active: true,
+      history: body.historyChat
+    })
+
+
+    // Cập nhật creditUsed của người dùng
+    const creditUsedDecimal = new Decimal(user.creditUsed);
+    const updatedCreditUsed = creditUsedDecimal.add(creditCostDecimal);
+
+    // Cập nhật số credit đã sử dụng của người dùng trong cơ sở dữ liệu
+    await user.updateOne({
+      creditUsed: updatedCreditUsed.toNumber(), // Cập nhật với giá trị dạng number
+    })
+
+    let history = ''
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    // Return message data
+    return {
+      contentBot: uploadFile,
+      createdAt: messageCreated.createdAt,
+      history: history,
+      _id: messageCreated._id,
+      file: uploadFileUser,
+    }
+
+  }, {
+    body: t.Object({
+      token: t.String(),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      historyChat: t.Optional(t.String({ historyChat: idMongodb })),
+    })
+  })
+  .post('/create-message-image-pre', async ({ body, error }) => {
+
+    const existToken = app.service.swat.verify(body.token)
+
+    if (!existToken) return {
+      status: 400
+    }
+    const getIdUser = app.service.swat.parse(body.token).subject
+    const user = await UserModel.findById(getIdUser)
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'Bot not found')
+
+    if (user.creditUsed >= user.credit) {
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: body.historyChat
+      })
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        history: body.historyChat
+      }
+
+      return messageData
+    }
+    let isEdit = false
+    let completions
+    if (body.file) {
+      isEdit = true
+      completions = await app.service.openai.images.edit({
+        model: "gpt-image-1",
+        image: body.file,
+        prompt: body.content,
+        size: "1024x1024",
+        quality: 'high',
+      })
+    }
+    else {
+      completions = await app.service.openai.images.generate({
+        model: "gpt-image-1",
+        prompt: body.content,
+        size: "1024x1024",
+        quality: "high",
+      })
+    }
+    if (!completions.data) return error(404, 'fail')
+
+    // Bước 1: Lấy base64
+    const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
+    if (!base64Data) return error(404, 'fail')
+    // Bước 2: Convert base64 thành buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Bước 3: Đặt tên file (ví dụ .png vì OpenAI image thường là PNG)
+    const convertFileName = "File-Chat/" + `${Date.now()}.png`;
+
+    // Bước 4: Upload lên S3
+    const file = app.service.client.file(convertFileName);
+
+    await file.write(buffer, {
+      acl: "public-read",
+      type: "image/png" // cố định vì OpenAI đang trả PNG
+    });
+    // Bước 5: Lấy URL
+    const uploadFile = app.service.getUrl + convertFileName;
+    // Tính toán chi phí credit
+    let costImage
+    let creditCost
+    creditCost = calculateCost(completions.usage, isEdit);
+
+    // Chuyển creditCost thành Decimal nếu cần
+    const creditCostDecimal = new Decimal(creditCost);
+
+    // Tạo tin nhắn
+    let messageCreated
+    let uploadFileUser
+    if (body.file) {
+      const fileName = await body.file.name.replace(/\s+/g, '')
+      const convertFileName = "File-Chat/" + Date.now() + fileName
+      const file = await app.service.client.file(convertFileName)
+      const fileBuffer = await body.file.arrayBuffer()
+
+      await file.write(Buffer.from(fileBuffer), {
+        acl: "public-read",
+        type: body.file.type
+      })
+
+      const uploadFileUser = app.service.getUrl + convertFileName
+
+      await imageUrlToBase64(uploadFileUser)
+
+      messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: completions.usage?.input_tokens,
+        tookendResponse: completions.usage?.output_tokens,
+        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        active: true,
+        history: body.historyChat,
+        fileUser: uploadFileUser
+      })
+    }
+    else {
+      messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: completions.usage?.input_tokens,
+        tookendResponse: completions.usage?.output_tokens,
+        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        active: true,
+        history: body.historyChat
+      })
+    }
+
+
+    // Cập nhật creditUsed của người dùng
+    const creditUsedDecimal = new Decimal(user.creditUsed);
+    const updatedCreditUsed = creditUsedDecimal.add(creditCostDecimal);
+
+    // Cập nhật số credit đã sử dụng của người dùng trong cơ sở dữ liệu
+    await user.updateOne({
+      creditUsed: updatedCreditUsed.toNumber(), // Cập nhật với giá trị dạng number
+    })
+
+    let history
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    // Return message data
+    return {
+      contentBot: uploadFile,
+      createdAt: messageCreated.createdAt,
+      history: history,
+      _id: messageCreated._id,
+      file: uploadFileUser,
+    };
+
+  }, {
+    body: t.Object({
+      token: t.String(),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      historyChat: t.Optional(t.String({ historyChat: idMongodb })),
+      file: t.Optional(t.File()),
+    })
+  })
+  .put('/update-message', async ({ body, error }) => {
+
+    const getMessage = await MessageModel.findById(body.id)
+
+    if (!getMessage) return error(404, 'fail')
+
+    await getMessage.updateOne({
+      status: body.status
+    })
+
+    return {
+      status: 200,
+      message: 'success'
+    }
+
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      status: t.Number()
+    })
+  })
+  .put('/update-message-history', async ({ body, error }) => {
+
+    const getMessage = await MessageModel.findById(body.id)
+
+    if (!getMessage) return error(404, 'fail')
+
+    await getMessage.updateOne({
+      history: body.history
+    })
+
+    const messageUpdate = await MessageModel.findById(body.id)
+
+    return messageUpdate?.toObject()
+
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      history: t.String()
+    })
+  })
+  .post('/create-voice', async ({ body, error }) => {
+
+    const messageFind = await MessageModel.findById(body.id)
+
+    if (!messageFind) return error(404)
+
+    const getUser = await UserModel.findById(messageFind.user)
+
+    if (!getUser) return error(404)
+
+    if (getUser.creditUsed >= getUser.credit) return {
+      status: 404,
+      message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+    }
+
+    const mp3 = await app.service.openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice: 'alloy',
+      input: body.content,
+    })
+
+    const convertFileName = `File-Audio/${getUser.email}/` + Date.now() + 'test'
+    const file = app.service.client.file(convertFileName)
+    const fileBuffer = Buffer.from(await mp3.arrayBuffer());
+
+    await file.write(Buffer.from(fileBuffer), {
+      acl: "public-read",
+      type: 'audio/mpeg'
+    })
+
+    const uploadFileUser = app.service.getUrl + convertFileName
+
+    await messageFind.updateOne({
+      voice: uploadFileUser
+    })
+
+    const res = await fetch(uploadFileUser)
+    const buffer = Buffer.from(await res.arrayBuffer())
+
+    const metadata = await parseBuffer(buffer, 'audio/mpeg')
+    if (!metadata.format.duration) {
+      return;
+    }
+
+    const priceAudio = new Decimal(0.00025).mul(5)
+    const secondAudio = metadata.format.duration
+    const costAudio = priceAudio.mul(secondAudio)
+
+    await getUser.updateOne({
+      creditUsed: costAudio.add(new Decimal(getUser.creditUsed))
+    })
+
+    return {
+      status: 200,
+      url: uploadFileUser
+    }
+
+  }, {
+    body: t.Object({
+      content: t.String(),
+      id: t.String({ id: idMongodb })
+    })
+  })
+  .post('/createmessage-test', async ({ body, error }) => {
+
+    const completions = await app.service.openai.chat.completions.create({
+      model: 'chatgpt-4o-latest',
+      store: true,
+      messages: [{
+        role: "user",
+        content: body.content,
+      }]
+    })
+
+    return completions
+
+  }, {
+    body: t.Object({
+      content: t.String(),
+    })
+  })
+  .post('/duration', async ({ body }) => {
+    const res = await fetch(body.url);
+    const buffer = Buffer.from(await res.arrayBuffer());
+
+    const metadata = await parseBuffer(buffer, 'audio/mpeg');
+
+    return { duration: metadata.format.duration } // duration tính bằng giây (số thực)
+  }, {
+    body: t.Object({
+      url: t.String()
+    })
+  })
+  .put('/delete-message/:id', async ({ params, error }) => {
+    const getMessage = await MessageModel.findById(params.id)
+
+    if (!getMessage) return error(404)
+
+    await getMessage.updateOne({
+      active: false
+    })
+
+    return getMessage
+  }, {
+    params: t.Object({ id: idMongodb })
+  })
+  .post('/create-message-mobile', async ({ body, error }) => {
+
+    const user = await UserModel.findById(body.id)
+
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+
+    if (!bot) return error(404, 'fail')
+
+    if (user.creditUsed >= user.credit) {
+      let history
+
+      if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: history
+      })
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: history
+      }
+      app.logger.info(messageData)
+      return messageData
+    }
+
+    const messages: any[] = []
+
+    const messageUsser = {
+      role: 'user',
+      content: body.content,
+    }
+
+    if (bot.templateMessage?.trim()) {
+      if (!body.historyChat) {
+        const messageDeveloper = {
+          role: 'developer',
+          content: bot.templateMessage,
+        }
+        messages.push(messageDeveloper)
+      }
+    }
+
+    const getFile = await FileManageModel.find({ bot: bot._id, active: true })
+
+    if (getFile.length > 0) {
+      for (const e of getFile) {
+        const response = await imageUrlToBase64(e.url)
+        // Kiểm tra loại file và xử lý riêng
+        if (response.type === 'application/pdf') {
+          const dataString = Buffer.from(response.content).toString('base64');
+          const mimeType = response.type; // ví dụ: application/pdf
+          const dataUrl = `data:${mimeType};base64,${dataString}`;
+          const pdf = {
+            role: "user",
+            content: [
+              {
+                type: "file",
+                file: {
+                  filename: response.file,
+                  file_data: dataUrl
+                }
+              },
+              {
+                type: "text",
+                text: body.content
+              }
+            ]
+          }
+          messages.push(pdf)
+        } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const result = await mammoth.extractRawText({ buffer: response.content });
+
+          const wordMessage = {
+            role: "developer",
+            content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp: " + result.value
+          }
+          messages.push(wordMessage)
+        } else if (response.type === 'text/plain') {
+          const textContent = response.content.toString('utf-8')
+          const txtMessage = {
+            role: "developer",
+            content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp:" + textContent
+          };
+          messages.push(txtMessage);
+        }
+      }
+    }
+
+    if (body.historyChat) {
+      const listMessage = await MessageModel.find({
+        history: body.historyChat, status: { $in: [0, 1] }, active: true
+      }).limit(5).sort({ createdAt: -1 })
+
+      if (listMessage.length > 0) {
+        listMessage.reverse();
+        for (const message of listMessage) {
+          if (message.fileUser && message.fileUser.trim() !== '') {
+            const response = await imageUrlToBase64(message.fileUser)
+
+            if (response.type === 'application/pdf') {
+              const dataString = Buffer.from(response.content).toString('base64')
+              const mimeType = response.type;
+              const dataUrl = `data:${mimeType};base64,${dataString}`
+              messages.push({
+                role: "user",
+                content: [
+                  {
+                    type: "file",
+                    file: {
+                      filename: response.file,
+                      file_data: dataUrl
+                    }
+                  },
+                  {
+                    type: "text",
+                    text: message.contentUser
+                  }]
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+            } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+              const result = await mammoth.extractRawText({ buffer: response.content });
+
+              messages.push({
+                role: "user",
+                content: message.contentUser + ": " + result.value
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+            } else if (response.type === 'text/plain') {
+              const textContent = response.content.toString('utf-8')
+              messages.push({
+                role: "user",
+                content: message.contentUser + ": " + textContent
+              })
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              })
+
+            } else if (response.type.startsWith('image/')) {
+              const base64Image = response.content.toString('base64');
+              messages.push({
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: message.contentUser
+                  },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:${response.type};base64,${base64Image}`
+                    }
+                  }
+                ]
+              });
+              messages.push({
+                role: 'assistant',
+                content: message.contentBot,
+              });
+            }
+          } else {
+            messages.push({
+              role: 'user',
+              content: message.contentUser,
+            }, {
+              role: 'assistant',
+              content: message.contentBot,
+            });
+          }
+        }
+      }
+
+    }
+
+    if (body.file) {
+      if (body.fileType?.startsWith('image/')) {
+        const imageMessage = {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: body.content
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: body.file
+              }
+            }
+          ]
+        };
+
+        messages.push(imageMessage)
+      }
+      else {
+        const response = await imageUrlToBase64(body.file)
+        if (response.type === 'application/pdf') {
+          const dataString = Buffer.from(response.content).toString('base64');
+          const mimeType = body.fileType; // ví dụ: application/pdf
+          const dataUrl = `data:${mimeType};base64,${dataString}`;
+          const pdf = {
+            role: "user",
+            content: [
+              {
+                type: "file",
+                file: {
+                  filename: response.file,
+                  file_data: dataUrl
+                }
+              },
+              {
+                type: "text",
+                text: body.content
+              }
+            ]
+          }
+          messages.push(pdf)
+        } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const result = await mammoth.extractRawText({ buffer: response.content });
+
+          const wordMessage = {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: result.value,  // Gửi văn bản thuần lên OpenAI
+              },
+              {
+                type: "text",
+                text: body.content,  // Gửi văn bản thuần lên OpenAI
+              },
+            ],
+          };
+          messages.push(wordMessage);
+        } else if (response.type === 'text/plain') {
+          const textContent = response.content.toString('utf-8')
+          const txtMessage = {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: textContent,  // Gửi văn bản thuần lên OpenAI
+              },
+              {
+                type: "text",
+                text: body.content,  // Gửi văn bản thuần lên OpenAI
+              },
+            ],
+          };
+          messages.push(txtMessage);
+        }
+      }
+    }
+    else {
+      messages.push(messageUsser)
+    }
+
+    const completions = await app.service.openai.chat.completions.create({
+      model: 'gpt-5',
+      store: true,
+      messages: messages
+    })
+
+    app.logger.info(completions)
+
+    let priceTokenRequest = new Decimal(0)
+    let priceTokenResponse = new Decimal(0)
+    const priceTokenInput = new Decimal(0.00000125)
+    const priceTokenOutput = new Decimal(0.00001)
+
+    if (completions.usage !== undefined && completions.usage !== null) {
+      priceTokenRequest = new Decimal(completions.usage.prompt_tokens);
+      priceTokenResponse = new Decimal(completions.usage.completion_tokens);
+    }
+
+
+    const totalCostInput = priceTokenRequest.mul(priceTokenInput)
+    const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
+
+
+    const totalCostRealInput = totalCostInput.mul(5)
+    const totalCostRealOutput = totalCostOutput.mul(5)
+
+    const messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: completions.choices[0].message.content,
+      fileUser: body.file,
+      tookenRequest: completions.usage?.prompt_tokens,
+      tookendResponse: completions.usage?.completion_tokens,
+      creditCost: totalCostRealInput.add(totalCostRealOutput),
+      active: true,
+      status: 0,
+      history: body.historyChat,
+      fileType: body.fileType
+    })
+
+    const creditUsed = new Decimal(user.creditUsed)
+    const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+
+    await user.updateOne({
+      creditUsed: creditUsedUpdate,
+    })
+
+    let history = ''
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    const messageData = {
+      contentBot: completions.choices[0].message.content,
+      createdAt: messageCreated.createdAt,
+      file: body.file,
+      status: messageCreated.status,
+      _id: messageCreated._id,
+      history: history
+    }
+
+    app.logger.info(messageData)
+    return messageData
+
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      file: t.Optional(t.String()),
+      fileType: t.Optional(t.String()),
+      historyChat: t.Optional(t.String())
+    })
+  })
+  .post('/create-message-mobile-gemini', async ({ body, error }) => {
+
+    // Lấy user
+    const user = await UserModel.findById(body.id)
+    if (!user) return error(404, 'fail')
+
+    // Lấy bot
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'fail')
+
+    // Hết credit
+    if (user.creditUsed >= user.credit) {
+      let history
+      if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) history = historyCreate._id.toString()
+      } else {
+        history = body.historyChat
+      }
+
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: history
+      })
+
+      return {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: history
+      }
+    }
+
+    // ================= Simplified Gemini logic =================
+    // Gom context văn bản: template bot (nếu dùng), tóm tắt file bot, 5 lượt hội thoại gần nhất, nội dung user hiện tại.
+
+    let systemInstruction = ''
+    if (bot.templateMessage?.trim() && !body.historyChat) {
+      systemInstruction = bot.templateMessage
+    }
+
+    // Thu thập nội dung file bot dạng text (PDF/Word/TXT) để thêm vào context (rút gọn tránh vượt token)
+    const botFileSnippets: string[] = []
+    const filesBot = await FileManageModel.find({ bot: bot._id, active: true })
+    for (const f of filesBot) {
+      try {
+        const resp = await imageUrlToBase64(f.url)
+        if (resp.type === 'application/pdf') {
+          // chỉ ghi chú có pdf, tránh gửi full base64
+          botFileSnippets.push(`[PDF]: ${resp.file}`)
+        } else if (resp.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const r = await mammoth.extractRawText({ buffer: resp.content })
+          botFileSnippets.push(r.value.substring(0, 1500))
+        } else if (resp.type === 'text/plain') {
+          const t = resp.content.toString('utf-8')
+          botFileSnippets.push(t.substring(0, 1500))
+        }
+      } catch (err) {
+        app.logger.error(err)
+      }
+    }
+
+    // Lịch sử gần nhất
+    const historyPairs: string[] = []
+    if (body.historyChat) {
+      const lastMessages = await MessageModel.find({ history: body.historyChat, status: { $in: [0,1] }, active: true })
+        .limit(5).sort({ createdAt: -1 })
+      lastMessages.reverse()
+      for (const m of lastMessages) {
+        historyPairs.push(`User: ${m.contentUser}`)
+        historyPairs.push(`Bot: ${m.contentBot}`)
+      }
+    }
+
+    // Nội dung user hiện tại
+    const userPrompt = body.content
+
+    // Nếu có file đính kèm của user (text/word/pdf) rút gọn vào prompt
+    let userFileSnippet = ''
+    if (body.file) {
+      try {
+        const rf = await imageUrlToBase64(body.file)
+        if (rf.type === 'application/pdf') {
+          userFileSnippet = `[User gửi PDF: ${rf.file}]`
+        } else if (rf.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const r = await mammoth.extractRawText({ buffer: rf.content })
+          userFileSnippet = r.value.substring(0, 1500)
+        } else if (rf.type === 'text/plain') {
+          userFileSnippet = rf.content.toString('utf-8').substring(0, 1500)
+        } else if (rf.type.startsWith('image/')) {
+          userFileSnippet = '[User gửi hình ảnh]' // Có thể mở rộng multi-modal sau
+        }
+      } catch (err) {
+        app.logger.error(err)
+      }
+    }
+
+    const aggregateContext = `Thông tin bot:\n${botFileSnippets.join('\n---\n')}\n\nLịch sử gần nhất:\n${historyPairs.join('\n')}\n\nNội dung người dùng hiện tại:\n${userPrompt}\n\nThông tin file người dùng (nếu có):\n${userFileSnippet}`
+
+    // Gemini contents: 1 message user
+    const contents = [
+      { role: 'user', parts: [{ text: aggregateContext }] }
+    ]
+    console.log(contents)
+    const completions = await app.service.gemini.models.generateContent({
+      model: 'gemini-2.5-pro',
+      contents,
+      config: systemInstruction ? { systemInstruction } : undefined,
+    })
+    return completions
+    // // Trích xuất nội dung trả lời
+    // let contentBot = ''
+    // if (completions?.candidates && completions.candidates.length > 0) {
+    //   const parts = completions.candidates[0].content?.parts || []
+    //   contentBot = parts.map((p: any) => p.text).join('\n')
+    // }
+
+    // // Tính chi phí tương tự OpenAI route
+    // let priceTokenRequest = new Decimal(0)
+    // let priceTokenResponse = new Decimal(0)
+    // const priceTokenInput = new Decimal(0.00000125)
+    // const priceTokenOutput = new Decimal(0.00001)
+
+    // if (completions?.usageMetadata) {
+    //   if (completions.usageMetadata.promptTokenCount) {
+    //     priceTokenRequest = new Decimal(completions.usageMetadata.promptTokenCount)
+    //   }
+    //   if (completions.usageMetadata.candidatesTokenCount) {
+    //     priceTokenResponse = new Decimal(completions.usageMetadata.candidatesTokenCount)
+    //   }
+    // }
+
+    // const totalCostInput = priceTokenRequest.mul(priceTokenInput)
+    // const totalCostOutput = priceTokenResponse.mul(priceTokenOutput)
+    // const totalCostRealInput = totalCostInput.mul(5)
+    // const totalCostRealOutput = totalCostOutput.mul(5)
+    // const creditCost = totalCostRealInput.add(totalCostRealOutput)
+
+    // const messageCreated = await MessageModel.create({
+    //   user: user._id,
+    //   bot: body.bot,
+    //   contentUser: body.content,
+    //   contentBot: contentBot,
+    //   fileUser: body.file,
+    //   tookenRequest: priceTokenRequest.toNumber(),
+    //   tookendResponse: priceTokenResponse.toNumber(),
+    //   creditCost: creditCost,
+    //   active: true,
+    //   status: 0,
+    //   history: body.historyChat,
+    //   fileType: body.fileType
+    // })
+
+    // const creditUsed = new Decimal(user.creditUsed)
+    // const creditUsedUpdate = creditUsed.add(messageCreated.creditCost)
+    // await user.updateOne({ creditUsed: creditUsedUpdate })
+
+    // let history = ''
+    // if (!body.historyChat) {
+    //   const historyCreate = await HistoryChat.create({
+    //     user: user._id,
+    //     bot: bot._id,
+    //     active: true,
+    //     name: body.content
+    //   })
+    //   if (historyCreate) history = historyCreate._id.toString()
+    // } else {
+    //   history = body.historyChat
+    // }
+
+    // const messageData = {
+    //   contentBot: contentBot,
+    //   createdAt: messageCreated.createdAt,
+    //   file: body.file,
+    //   status: messageCreated.status,
+    //   _id: messageCreated._id,
+    //   history: history
+    // }
+
+    // app.logger.info(messageData)
+    // return messageData
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      file: t.Optional(t.String()),
+      fileType: t.Optional(t.String()),
+      historyChat: t.Optional(t.String())
+    })
+  })
+  .post('/create-message-image-mobile', async ({ body, error }) => {
+
+    const user = await UserModel.findById(body.id)
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'Bot not found')
+
+    if (user.creditUsed >= user.credit) {
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: body.historyChat
+      })
+      let history
+      if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        status: messageCreated.status,
+        history: history
+      }
+
+      return messageData
+    }
+
+    const completions = await app.service.openai.images.generate({
+      model: "dall-e-3",
+      prompt: body.content,
+      size: "1024x1024",
+      response_format: 'b64_json'
+    })
+
+    if (!completions.data) return error(404, 'fail')
+
+    // Bước 1: Lấy base64
+    const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
+    if (!base64Data) return error(404, 'fail')
+    // Bước 2: Convert base64 thành buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Bước 3: Đặt tên file (ví dụ .png vì OpenAI image thường là PNG)
+    const convertFileName = "File-Chat/" + `${Date.now()}.png`;
+
+    // Bước 4: Upload lên S3
+    const file = app.service.client.file(convertFileName);
+
+    await file.write(buffer, {
+      acl: "public-read",
+      type: "image/png" // cố định vì OpenAI đang trả PNG
+    });
+    // Bước 5: Lấy URL
+    const uploadFile = app.service.getUrl + convertFileName;
+    // Tính toán chi phí credit
+    let costImage
+    let creditCost
+    costImage = new Decimal(0.04)
+    creditCost = costImage.mul(5);
+
+    // Chuyển creditCost thành Decimal nếu cần
+    const creditCostDecimal = new Decimal(creditCost);
+
+    // Tạo tin nhắn
+    let messageCreated
+    let uploadFileUser
+
+    messageCreated = await MessageModel.create({
+      user: user._id,
+      bot: body.bot,
+      contentUser: body.content,
+      contentBot: uploadFile,
+      tookenRequest: 0,
+      tookendResponse: 0,
+      creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+      active: true,
+      history: body.historyChat
+    })
+
+
+    // Cập nhật creditUsed của người dùng
+    const creditUsedDecimal = new Decimal(user.creditUsed);
+    const updatedCreditUsed = creditUsedDecimal.add(creditCostDecimal);
+
+    // Cập nhật số credit đã sử dụng của người dùng trong cơ sở dữ liệu
+    await user.updateOne({
+      creditUsed: updatedCreditUsed.toNumber(), // Cập nhật với giá trị dạng number
+    })
+
+    let history = ''
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    // Return message data
+    return {
+      contentBot: uploadFile,
+      createdAt: messageCreated.createdAt,
+      history: history,
+      _id: messageCreated._id,
+      file: uploadFileUser,
+    }
+
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      historyChat: t.Optional(t.String({ historyChat: idMongodb })),
+    })
+  })
+  .post('/create-message-image-pre-mobile', async ({ body, error }) => {
+
+    const user = await UserModel.findById(body.id)
+    if (!user) return error(404, 'fail')
+
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) return error(404, 'Bot not found')
+
+    if (user.creditUsed >= user.credit) {
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: body.historyChat
+      })
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        history: body.historyChat
+      }
+
+      return messageData
+    }
+    let isEdit = false
+    let completions
+    if (body.file) {
+      isEdit = true
+      completions = await app.service.openai.images.edit({
+        model: "gpt-image-1",
+        image: body.file,
+        prompt: body.content,
+        size: "1024x1024",
+        quality: 'high',
+      })
+    }
+    else {
+      completions = await app.service.openai.images.generate({
+        model: "gpt-image-1",
+        prompt: body.content,
+        size: "1024x1024",
+        quality: "high",
+      })
+    }
+    if (!completions.data) return error(404, 'fail')
+
+    // Bước 1: Lấy base64
+    const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
+    if (!base64Data) return error(404, 'fail')
+    // Bước 2: Convert base64 thành buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Bước 3: Đặt tên file (ví dụ .png vì OpenAI image thường là PNG)
+    const convertFileName = "File-Chat/" + `${Date.now()}.png`;
+
+    // Bước 4: Upload lên S3
+    const file = app.service.client.file(convertFileName);
+
+    await file.write(buffer, {
+      acl: "public-read",
+      type: "image/png" // cố định vì OpenAI đang trả PNG
+    });
+    // Bước 5: Lấy URL
+    const uploadFile = app.service.getUrl + convertFileName;
+    // Tính toán chi phí credit
+    let costImage
+    let creditCost
+    creditCost = calculateCost(completions.usage, isEdit);
+
+    // Chuyển creditCost thành Decimal nếu cần
+    const creditCostDecimal = new Decimal(creditCost);
+
+    // Tạo tin nhắn
+    let messageCreated
+    let uploadFileUser
+    if (body.file) {
+      const fileName = await body.file.name.replace(/\s+/g, '')
+      const convertFileName = "File-Chat/" + Date.now() + fileName
+      const file = await app.service.client.file(convertFileName)
+      const fileBuffer = await body.file.arrayBuffer()
+
+      await file.write(Buffer.from(fileBuffer), {
+        acl: "public-read",
+        type: body.file.type
+      })
+
+      const uploadFileUser = app.service.getUrl + convertFileName
+
+      await imageUrlToBase64(uploadFileUser)
+
+      messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: completions.usage?.input_tokens,
+        tookendResponse: completions.usage?.output_tokens,
+        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        active: true,
+        history: body.historyChat,
+        fileUser: uploadFileUser
+      })
+    }
+    else {
+      messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: completions.usage?.input_tokens,
+        tookendResponse: completions.usage?.output_tokens,
+        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        active: true,
+        history: body.historyChat
+      })
+    }
+
+
+    // Cập nhật creditUsed của người dùng
+    const creditUsedDecimal = new Decimal(user.creditUsed);
+    const updatedCreditUsed = creditUsedDecimal.add(creditCostDecimal);
+
+    // Cập nhật số credit đã sử dụng của người dùng trong cơ sở dữ liệu
+    await user.updateOne({
+      creditUsed: updatedCreditUsed.toNumber(), // Cập nhật với giá trị dạng number
+    })
+
+    let history
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    // Return message data
+    return {
+      contentBot: uploadFile,
+      createdAt: messageCreated.createdAt,
+      history: history,
+      _id: messageCreated._id,
+      file: uploadFileUser,
+    };
+
+  }, {
+    body: t.Object({
+      id: t.String({ id: idMongodb }),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      historyChat: t.Optional(t.String({ historyChat: idMongodb })),
+      file: t.Optional(t.File()),
+    })
+  })
+  .post('/gemini-test', async () => {
+    const completions = await app.service.gemini.models.generateContent({
+      model: 'gemini-2.5-pro',
+      contents: "xin chào"
+    })
+    if (completions.candidates && completions.candidates.length > 0)
+    {
+      console.log(completions)
+      console.log(completions.usageMetadata)
+    }
+    return completions
+  })
+.post('/gemini-video-test', async () => {
+  let operation = await app.service.gemini.models.generateVideos({
+    model: 'veo-3.0-generate-001',
+    prompt: "A close up of two people staring at a cryptic drawing on a wall, torchlight flickering.A man murmurs, 'This must be it. That's the secret code.' The woman looks at him and whispering excitedly, 'What did you find?'"
+  })
+  while (!operation.done) {
+    console.log("Waiting for video generation to complete...")
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+    operation = await app.service.gemini.operations.getVideosOperation({
+      operation: operation,
+    });
+  }
+
+  const generatedVideos = operation.response?.generatedVideos
+  if (!generatedVideos || generatedVideos.length === 0 || !generatedVideos[0].video) {
+    return { status: 'error', message: 'No generated video in operation response' }
+  }
+
+  const videoFile = generatedVideos[0].video
+
+  await app.service.gemini.files.download({
+    file: videoFile,
+    downloadPath: "dialogue_example.mp4",
+  })
+
+  return { status: 'ok', video: videoFile }
+})
+export default controllerMessage
