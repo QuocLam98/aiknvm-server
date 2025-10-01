@@ -9,7 +9,7 @@ interface IBot {
     active: boolean,
     image: string,
     status: number
-    piority?: string
+    priority?: string
 }
 
 const BotSchema = new Schema<IBot>({
@@ -19,7 +19,7 @@ const BotSchema = new Schema<IBot>({
     active: { type: Boolean, required: true},
     image: { type: String },
     status: { type: Number},
-    piority: { type: String, default: '0' }
+    priority: { type: String, default: '0' }
 }, {
     timestamps: true
 })
