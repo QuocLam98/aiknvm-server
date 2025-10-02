@@ -8,7 +8,8 @@ interface IStore {
     updatedAt: Date,
     active: boolean,
     price: string,
-    type: string
+    fileType: string,
+    type: string,
 }
 
 const StoreSchema = new Schema<IStore>({
@@ -16,8 +17,9 @@ const StoreSchema = new Schema<IStore>({
     description: { type: String,},
     url: { type: String },
     price: { type: String },
-    type: { type: String },
+    fileType: { type: String },
     active: { type: Boolean, required: true},
+    type: { type: String },
 }, {
     timestamps: true
 })
