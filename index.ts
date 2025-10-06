@@ -9,8 +9,10 @@ app.start(async () => {
 
   http.use(swagger())
   http.use(cors({
-    origin: '*'
+    origin: app.service.config.URL_CLIENT
   }))
+  // Simple health check for load balancer / reverse proxy
+  http.get('/healthz', () => ({ status: 'ok' }))
   http.use(routers)
   http.listen({
     port: Number(app.service.config.PORT) || 3000,
