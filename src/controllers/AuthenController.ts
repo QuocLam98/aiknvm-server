@@ -492,7 +492,6 @@ const controllerAuthen = new Elysia()
 
     // Giải mã token (tuỳ chọn xác thực)
     const payload = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64').toString())
-
     // Xử lý logic: tạo tài khoản hoặc trả về token
     const existUser = await UserModel.findOne({ email: payload.email })
 
@@ -508,7 +507,7 @@ const controllerAuthen = new Elysia()
         image: payload.picture
       })
       const token = app.service.swat.create(getUser.id, getUser.role, Math.floor(Date.now() / 1000) + 21600)
-      return { message: 'success', status: 200, token, email: getUser.email, data: true }
+      return { message: 'success', status: 200, token, email: getUser.email, data: true, phone: getUser.phone }
     }
 
     if (existUser.active === false) {
@@ -516,7 +515,7 @@ const controllerAuthen = new Elysia()
     }
 
     const token = app.service.swat.create(existUser.id, existUser.role, Math.floor(Date.now() / 1000) + 21600)
-    return { message: 'success', status: 200, token, email: existUser.email, data: true }
+    return { message: 'success', status: 200, token, email: existUser.email, data: true , phone: existUser.phone}
 
   }, {
     body: t.Object({
