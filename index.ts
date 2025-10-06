@@ -9,7 +9,7 @@ app.start(async () => {
 
   http.use(swagger())
   http.use(cors({
-    origin: app.service.config.URL_CLIENT
+    origin: '*'
   }))
   http.use(routers)
   http.listen({
