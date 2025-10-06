@@ -13,7 +13,7 @@ app.start(async () => {
   }))
   http.use(routers)
   http.listen({
-    port: Number(app.service.config.PORT) || 3000,
+    port: 3000,
     hostname: '0.0.0.0',
     idleTimeout: 80, // Đặt timeout thành 30 giây
   })
