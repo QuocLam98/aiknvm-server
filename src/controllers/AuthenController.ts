@@ -503,7 +503,7 @@ const controllerAuthen = new Elysia()
         active: true,
         role: 'user',
         confirm: true,
-        credit: 1,
+        credit: 0,
         phone: '',
         image: payload.picture
       })
@@ -652,7 +652,7 @@ const controllerAuthen = new Elysia()
         active: true,
         role: 'user',
         confirm: true,
-        credit: 1,
+        credit: 0,
         phone: ''
       })
     } else if (user.active === false) {
