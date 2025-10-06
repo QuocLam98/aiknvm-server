@@ -9,11 +9,12 @@ app.start(async () => {
 
   http.use(swagger())
   http.use(cors({
-    origin: app.service.config.URL_CLIENT
+    origin: '*'
   }))
   http.use(routers)
   http.listen({
     port: Number(app.service.config.PORT) || 3000,
+    hostname: '0.0.0.0',
     idleTimeout: 80, // Đặt timeout thành 30 giây
   })
   app.on('stop', () => http.stop())
