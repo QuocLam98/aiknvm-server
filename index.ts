@@ -8,9 +8,9 @@ app.start(async () => {
   const http = new Elysia()
 
   http.use(swagger())
-  http.use(cors({
-    origin: app.service.config.URL_CLIENT
-  }))
+  // http.use(cors({
+  //   origin: app.service.config.URL_CLIENT
+  // }))
   http.use(routers)
   http.listen({
     port: Number(app.service.config.PORT) || 3000,
