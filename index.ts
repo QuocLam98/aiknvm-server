@@ -12,7 +12,6 @@ app.start(async () => {
     origin: app.service.config.URL_CLIENT
   }))
   // Simple health check for load balancer / reverse proxy
-  http.get('/healthz', () => ({ status: 'ok' }))
   http.use(routers)
   http.listen({
     port: 3000,
