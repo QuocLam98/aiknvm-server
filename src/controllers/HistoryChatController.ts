@@ -2,6 +2,7 @@ import Elysia, { t } from 'elysia'
 import BotModel from '~/models/BotModel'
 import UserModel from '~/models/UserModel'
 import HistoryChat from '~/models/HistoryChat'
+import MessageModel from '~/models/MessageModel'
 import app from '~/app'
 
 const idMongodb = t.String({ format: 'regex', pattern: '[0-9a-f]{24}$' })
@@ -37,13 +38,15 @@ const controllerHistoryChat = new Elysia()
     })
   })
   .put('/delete-chat', async ({ body, error }) => {
-    const exist = HistoryChat.findById(body.id)
+    const exist = await HistoryChat.findById(body.id)
 
     if (!exist) return error(404, 'fail')
 
-    await exist.updateOne({
-      active: false
-    })
+    // Hard delete history and cascade delete messages with the same history id
+    await Promise.all([
+      HistoryChat.deleteOne({ _id: body.id }),
+      MessageModel.deleteMany({ history: body.id })
+    ])
 
     return {
       status: 200,
