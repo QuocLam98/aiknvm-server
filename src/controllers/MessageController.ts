@@ -991,6 +991,201 @@ const controllerMessage = new Elysia()
       id: t.String({ id: idMongodb })
     })
   })
+  // Create voice using Google Gemini TTS
+  .post('/create-voice-gemini', async ({ body, error }) => {
+    // Helper: parse mime like "audio/l16;rate=24000;channels=1"
+    const parseAudioMime = (mime?: string): { base?: string; sampleRate?: number; channels?: number } => {
+      if (!mime) return {}
+      const parts = mime.split(';').map(s => s.trim())
+      const base = parts.shift()?.toLowerCase()
+      const out: { base?: string; sampleRate?: number; channels?: number } = { base }
+      for (const p of parts) {
+        const [k, v] = p.split('=').map(s => s.trim().toLowerCase())
+        if (!k || !v) continue
+        if (k === 'rate' || k === 'samplerate') {
+          const n = parseInt(v, 10); if (!Number.isNaN(n)) out.sampleRate = n
+        } else if (k === 'channels' || k === 'channel') {
+          const n = parseInt(v, 10); if (!Number.isNaN(n)) out.channels = n
+        }
+      }
+      return out
+    }
+
+    // Helper: wrap PCM16LE into WAV header
+    const pcm16leToWav = (pcm: Buffer, sampleRate: number, channels: number = 1): Buffer => {
+      const byteRate = sampleRate * channels * 2 // 16-bit
+      const blockAlign = channels * 2
+      const dataSize = pcm.length
+      const riffSize = 36 + dataSize
+      const header = Buffer.alloc(44)
+      header.write('RIFF', 0)
+      header.writeUInt32LE(riffSize, 4)
+      header.write('WAVE', 8)
+      header.write('fmt ', 12)
+      header.writeUInt32LE(16, 16) // PCM chunk size
+      header.writeUInt16LE(1, 20) // Audio format = 1 (PCM)
+      header.writeUInt16LE(channels, 22)
+      header.writeUInt32LE(sampleRate, 24)
+      header.writeUInt32LE(byteRate, 28)
+      header.writeUInt16LE(blockAlign, 32)
+      header.writeUInt16LE(16, 34) // bits per sample
+      header.write('data', 36)
+      header.writeUInt32LE(dataSize, 40)
+      return Buffer.concat([header, pcm]) as unknown as Buffer
+    }
+    
+    const messageFind = await MessageModel.findById(body.id)
+    if (!messageFind) return error(404)
+
+    const getUser = await UserModel.findById(messageFind.user)
+    if (!getUser) return error(404)
+
+    if (getUser.creditUsed >= getUser.credit) return {
+      status: 404,
+      message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+    }
+
+    // Generate audio using Gemini TTS
+    const audio = await app.service.gemini.models.generateContent({
+      model: 'gemini-2.5-flash-preview-tts',
+      contents: [{ role: 'user', parts: [{ text: body.content }]}],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
+      }
+    })
+    // console.log(audio.data)
+    // Extract audio data
+    const parts = audio.candidates?.[0]?.content?.parts || []
+    let audioData: string | undefined
+    let mimeType = 'audio/wav' // Gemini TTS thường trả về WAV
+    
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        audioData = part.inlineData.data
+        mimeType = part.inlineData.mimeType || 'audio/wav'
+        break
+      }
+    }
+    if (!audioData) return error(500, 'No audio generated')
+
+    // Prepare buffer for upload, wrapping raw PCM (audio/l16|audio/pcm) into WAV
+    const mimeInfo = parseAudioMime(mimeType)
+  let uploadBuffer: Buffer = Buffer.from(audioData, 'base64') as unknown as Buffer
+    let uploadMime = mimeType
+    let ext = '.wav'
+
+    const isRawPcm = (mimeInfo.base?.includes('audio/l16') || (mimeInfo.base?.includes('audio/pcm') && !mimeInfo.base.includes('wav')))
+    if (isRawPcm) {
+      const sampleRate = mimeInfo.sampleRate || 24000
+      const channels = mimeInfo.channels || 1
+      // Note: assuming PCM 16-bit little-endian for WAV compatibility
+      // If upstream provides big-endian, swap bytes here before wrapping.
+  uploadBuffer = pcm16leToWav(uploadBuffer as unknown as Buffer, sampleRate, channels)
+      uploadMime = 'audio/wav'
+      ext = '.wav'
+    } else if (mimeType.includes('wav')) {
+      uploadMime = 'audio/wav'
+      ext = '.wav'
+    } else if (mimeType.includes('mpeg') || mimeType.includes('mp3')) {
+      uploadMime = 'audio/mpeg'
+      ext = '.mp3'
+    } else {
+      // Fallback: treat as WAV to maximize playability
+      uploadMime = 'audio/wav'
+      ext = '.wav'
+    }
+
+    const convertFileName = `File-Audio/${getUser.email}/` + Date.now() + '-gemini' + ext
+    const file = app.service.client.file(convertFileName)
+
+    await file.write(uploadBuffer, {
+      acl: "public-read",
+      type: uploadMime
+    })
+
+    const uploadFileUser = app.service.getUrl + convertFileName
+
+    await messageFind.updateOne({
+      voice: uploadFileUser
+    })
+
+    // Calculate duration and cost
+    const res = await fetch(uploadFileUser)
+    const buffer = Buffer.from(await res.arrayBuffer())
+
+    let duration = 0
+    try {
+      // Try parsing with the actual upload mime type first
+      const metadata = await parseBuffer(buffer, uploadMime.includes('wav') ? 'audio/wav' : 'audio/mpeg')
+      if (metadata?.format?.duration) {
+        duration = metadata.format.duration
+      }
+    } catch {
+      // Fallback to 0 if duration parsing fails
+    }
+
+    // If parsing failed and we wrapped from PCM, compute duration from PCM params
+    if ((!duration || duration <= 0) && isRawPcm) {
+      const sr = mimeInfo.sampleRate || 24000
+      const ch = mimeInfo.channels || 1
+      // Our uploaded buffer is WAV, so subtract header when estimating
+      const dataLen = Math.max(0, uploadBuffer.length - 44)
+      duration = dataLen / (sr * ch * 2)
+    }
+
+    // Pricing based on Gemini TTS token rates:
+    // Input text: $0.50 per 1M tokens, Output audio: $10.00 per 1M tokens
+    const um: any = (audio as any)?.usageMetadata
+    const promptTokens = new Decimal(um?.promptTokenCount ?? 0)
+    // Try to find AUDIO tokens specifically
+    let audioTokens = new Decimal(0)
+    try {
+      const details = um?.candidatesTokensDetails || um?.candidatesTokensDetail || []
+      if (Array.isArray(details) && details.length > 0) {
+        const sum = details
+          .filter((d: any) => (d?.modality === 'AUDIO' || d?.modality === 3))
+          .reduce((acc: number, d: any) => acc + (d?.tokenCount || 0), 0)
+        audioTokens = new Decimal(sum)
+      } else if (um?.candidatesTokenCount != null) {
+        // Fallback to overall candidates tokens if modality breakdown missing
+        audioTokens = new Decimal(um.candidatesTokenCount)
+      }
+    } catch { /* noop */ }
+
+    const costInputUSD = promptTokens.mul(0.50).div(1_000_000)
+    const costAudioUSD = audioTokens.mul(10).div(1_000_000)
+    const totalUSD = costInputUSD.add(costAudioUSD)
+    // Apply 5x multiplier to map to your credit scheme (consistent with other routes)
+    const totalCredit = totalUSD.mul(5)
+
+    // As a very last resort (if both tokens are zero), fallback to duration-based minimal charge
+    let finalCharge = totalCredit
+    if (finalCharge.lte(0)) {
+      const fallbackPerSecUSD = new Decimal(0.00025) // legacy per-second rate
+      finalCharge = fallbackPerSecUSD.mul(duration || 0).mul(5)
+    }
+
+    await messageFind.updateOne({
+      tookenRequest: promptTokens.toString(),
+      tookendResponse: audioTokens.toString(),
+    })
+
+    await getUser.updateOne({
+      creditUsed: new Decimal(getUser.creditUsed).add(finalCharge)
+    })
+
+    return {
+      status: 200,
+      url: uploadFileUser
+    }
+
+  }, {
+    body: t.Object({
+      content: t.String(),
+      id: t.String({ id: idMongodb })
+    })
+  })
   .post('/createmessage-test', async ({ body, error }) => {
 
     const completions = await app.service.openai.chat.completions.create({
@@ -1012,10 +1207,58 @@ const controllerMessage = new Elysia()
   .post('/duration', async ({ body }) => {
     const res = await fetch(body.url);
     const buffer = Buffer.from(await res.arrayBuffer());
+    const ct = res.headers.get('content-type') || undefined
 
-    const metadata = await parseBuffer(buffer, 'audio/mpeg');
+    // Try with reported content-type first
+    let duration: number | undefined
+    try {
+      const md = await parseBuffer(buffer, ct as any)
+      if (md?.format?.duration && md.format.duration > 0) duration = md.format.duration
+      else {
+        const md2 = await parseBuffer(buffer)
+        if (md2?.format?.duration && md2.format.duration > 0) duration = md2.format.duration
+      }
+    } catch { /* noop */ }
 
-    return { duration: metadata.format.duration } // duration tính bằng giây (số thực)
+    // WAV manual fallback
+    const computeWavDuration = (buf: Buffer): number | undefined => {
+      try {
+        if (buf.length < 44) return undefined
+        const riff = buf.toString('ascii', 0, 4)
+        const wave = buf.toString('ascii', 8, 12)
+        if (riff !== 'RIFF' || wave !== 'WAVE') return undefined
+        let off = 12
+        let byteRate: number | undefined
+        let dataSize: number | undefined
+        while (off + 8 <= buf.length) {
+          const id = buf.toString('ascii', off, off + 4)
+          const size = buf.readUInt32LE(off + 4)
+          if (id === 'fmt ') {
+            if (off + 24 <= buf.length) byteRate = buf.readUInt32LE(off + 16)
+          } else if (id === 'data') {
+            dataSize = size
+          }
+          off += 8 + size + (size % 2)
+        }
+        if (byteRate && dataSize) return dataSize / byteRate
+      } catch { /* noop */ }
+      return undefined
+    }
+
+    if ((duration === undefined || duration <= 0) && (ct?.includes('wav'))) {
+      duration = computeWavDuration(buffer)
+    }
+
+    // MP3 bitrate estimate fallback
+    if ((duration === undefined || duration <= 0) && (ct?.includes('mpeg') || ct?.includes('mp3'))) {
+      try {
+        const md3 = await parseBuffer(buffer, 'audio/mpeg')
+        const br = md3?.format?.bitrate
+        if (br && br > 0) duration = (buffer.length * 8) / br
+      } catch { /* noop */ }
+    }
+
+    return { duration: duration ?? 0 } // duration tính bằng giây (số thực)
   }, {
     body: t.Object({
       url: t.String()
@@ -1978,43 +2221,4 @@ const controllerMessage = new Elysia()
       file: t.Optional(t.File()),
     })
   })
-  .post('/gemini-test', async () => {
-    const completions = await app.service.gemini.models.generateContent({
-      model: 'gemini-2.5-pro',
-      contents: "xin chào1"
-    })
-    if (completions.candidates && completions.candidates.length > 0)
-    {
-      console.log(completions)
-      console.log(completions.usageMetadata)
-    }
-    return completions
-  })
-.post('/gemini-video-test', async () => {
-  let operation = await app.service.gemini.models.generateVideos({
-    model: 'veo-3.0-generate-001',
-    prompt: "A close up of two people staring at a cryptic drawing on a wall, torchlight flickering.A man murmurs, 'This must be it. That's the secret code.' The woman looks at him and whispering excitedly, 'What did you find?'"
-  })
-  while (!operation.done) {
-    console.log("Waiting for video generation to complete...")
-    await new Promise((resolve) => setTimeout(resolve, 10000));
-    operation = await app.service.gemini.operations.getVideosOperation({
-      operation: operation,
-    });
-  }
-
-  const generatedVideos = operation.response?.generatedVideos
-  if (!generatedVideos || generatedVideos.length === 0 || !generatedVideos[0].video) {
-    return { status: 'error', message: 'No generated video in operation response' }
-  }
-
-  const videoFile = generatedVideos[0].video
-
-  await app.service.gemini.files.download({
-    file: videoFile,
-    downloadPath: "dialogue_example.mp4",
-  })
-
-  return { status: 'ok', video: videoFile }
-})
 export default controllerMessage

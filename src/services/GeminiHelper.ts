@@ -2,6 +2,7 @@ import Decimal from 'decimal.js';
 import mammoth from 'mammoth';
 import imageUrlToBase64 from './Base64';
 import { Model } from 'mongoose';
+import FileManageModel from '~/models/FileManageModel'
 
 // Types kept minimal to avoid importing all model typings
 interface IMessageDoc {
@@ -38,7 +39,7 @@ export interface PreparedGeminiInput {
 export async function prepareGeminiInput({ app, bot, historyId, userPrompt, fileUrl, includeTemplate, MessageModel }: PrepareParams): Promise<PreparedGeminiInput> {
   const botFileSnippets: string[] = [];
   try {
-    const filesBot = await app.models.FileManageModel.find({ bot: bot._id, active: true });
+    const filesBot = await FileManageModel.find({ bot: bot._id, active: true });
     for (const f of filesBot) {
       try {
         const resp = await imageUrlToBase64(f.url);

@@ -7,7 +7,6 @@ import { cors } from '@elysiajs/cors'
 app.start(async () => {
   const http = new Elysia()
 
-  http.use(swagger())
   http.use(cors({
     origin: app.service.config.URL_CLIENT
   }))
