@@ -502,7 +502,7 @@ const controllerAuthen = new Elysia()
         active: true,
         role: 'user',
         confirm: true,
-        credit: 0,
+        credit: 2,
         phone: '',
         image: payload.picture
       })
