@@ -74,7 +74,8 @@ const controllerBot = new Elysia()
       image: uploadImage,
       description: desc,
       status: Number(body.status),
-      priority: body.priority
+      priority: body.priority,
+      models: body.models
     })
 
     return createBot.toObject()
@@ -85,7 +86,8 @@ const controllerBot = new Elysia()
       image: t.Optional(t.File({ format: 'image/*' })),
       description: t.Optional(t.String()),
       status: t.Optional(t.String()),
-      priority: t.Optional(t.String())
+      priority: t.Optional(t.String()),
+      models: t.Optional(t.String())
     })
   })
   .put('/update-bot/:id', async ({ params, body, set, error }) => {
@@ -97,6 +99,7 @@ const controllerBot = new Elysia()
     let name = bot.name
     let templateMessage = bot.templateMessage
     let priority = bot.priority
+    let models = bot.models
 
     if (body.image) 
      {
@@ -132,6 +135,11 @@ const controllerBot = new Elysia()
       priority = body.priority
     }
 
+    if (body.models)
+    {
+      models = body.models
+    }
+
     await bot.updateOne({
       name: name,
       templateMessage: templateMessage,
@@ -153,7 +161,8 @@ const controllerBot = new Elysia()
       image: t.Optional(t.File({ format: 'image/*' })),
       description: t.Optional(t.String()),
       status: t.Optional(t.String()),
-      priority: t.Optional(t.String())
+      priority: t.Optional(t.String()),
+      models: t.Optional(t.String())
     })
   })
   .put('/delete-bot/:id', async ({ params, error }) => {

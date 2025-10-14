@@ -8,8 +8,9 @@ interface IBot {
     updatedAt: Date,
     active: boolean,
     image: string,
-    status: number
-    priority?: string
+    status: number,
+    priority?: string,
+    models: string
 }
 
 const BotSchema = new Schema<IBot>({
@@ -19,7 +20,8 @@ const BotSchema = new Schema<IBot>({
     active: { type: Boolean, required: true},
     image: { type: String },
     status: { type: Number},
-    priority: { type: String, default: '0' }
+    priority: { type: String, default: '0' },
+    models: { type: String, default: '1' }
 }, {
     timestamps: true
 })
