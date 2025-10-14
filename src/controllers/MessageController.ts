@@ -182,8 +182,6 @@ const controllerMessage = new Elysia()
       return messageData
     }
 
-    // const useBot = await UseBotModel.findOne({ bot: bot._id, user: user._id })
-
     const messages: any[] = []
 
     const messageUsser = {
@@ -200,15 +198,6 @@ const controllerMessage = new Elysia()
         messages.push(messageDeveloper)
       }
     }
-
-    // if (useBot) {
-    //   const messageDeveloperUse = {
-    //     role: 'developer',
-    //     content: useBot.templateMessage,
-    //   }
-
-    //   messages.push(messageDeveloperUse)
-    // }
 
     const getFile = await FileManageModel.find({ bot: bot._id, active: true })
 
@@ -255,52 +244,6 @@ const controllerMessage = new Elysia()
         }
       }
     }
-
-    // const getFileUser = await FileUserManage.find({ bot: bot._id, active: true, user: user._id })
-
-    // if (getFileUser.length > 0) {
-    //   for (const e of getFileUser) {
-    //     const response = await imageUrlToBase64(e.url)
-    //     // Kiểm tra loại file và xử lý riêng
-    //     if (response.type === 'application/pdf') {
-    //       const dataString = Buffer.from(response.content).toString('base64')
-    //       const mimeType = response.type; // ví dụ: application/pdf
-    //       const dataUrl = `data:${mimeType};base64,${dataString}`
-    //       const pdf = {
-    //         role: "developer",
-    //         content: [
-    //           {
-    //             type: "file",
-    //             file: {
-    //               filename: response.file,
-    //               file_data: dataUrl
-    //             }
-    //           },
-    //           {
-    //             type: "text",
-    //             text: "Tham khảo qua nội dung trong file để đưa ra câu trả lời phù hợp"
-    //           }
-    //         ]
-    //       }
-    //       messages.push(pdf)
-    //     } else if (response.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    //       const result = await mammoth.extractRawText({ buffer: response.content });
-
-    //       const wordMessage = {
-    //         role: "developer",
-    //         content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp: " + result.value
-    //       }
-    //       messages.push(wordMessage)
-    //     } else if (response.type === 'text/plain') {
-    //       const textContent = response.content.toString('utf-8')
-    //       const txtMessage = {
-    //         role: "developer",
-    //         content: "Tham khảo nội dung để đưa ra câu trả lời phù hợp:" + textContent
-    //       };
-    //       messages.push(txtMessage);
-    //     }
-    //   }
-    // }
 
     if (body.historyChat) {
       const listMessage = await MessageModel.find({
@@ -476,19 +419,38 @@ const controllerMessage = new Elysia()
     else {
       messages.push(messageUsser)
     }
-
-    const completions = await app.service.openai.chat.completions.create({
-      model: 'gpt-5',
-      store: true,
-      messages: messages
-    })
+    let completions
+    if (body.model === 'gpt-5')
+    {
+      completions = await app.service.openai.chat.completions.create({
+        model: 'gpt-5',
+        store: true,
+        messages: messages
+      })
+    }
+    else {
+      completions = await app.service.openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        store: true,
+        messages: messages
+      })
+    }
 
     app.logger.info(completions)
 
     let priceTokenRequest = new Decimal(0)
     let priceTokenResponse = new Decimal(0)
-    const priceTokenInput = new Decimal(0.00000125)
-    const priceTokenOutput = new Decimal(0.00001)
+    let priceTokenInput
+    let priceTokenOutput
+    if (body.model === 'gpt-5') {
+      priceTokenInput = new Decimal(0.00000125)
+      priceTokenOutput = new Decimal(0.00001)
+    }
+    else {
+      priceTokenInput = new Decimal(0.00000025)
+      priceTokenOutput = new Decimal(0.000002)
+    }
+
 
     if (completions.usage !== undefined && completions.usage !== null) {
       priceTokenRequest = new Decimal(completions.usage.prompt_tokens);
@@ -561,7 +523,8 @@ const controllerMessage = new Elysia()
       content: t.String(),
       file: t.Optional(t.String()),
       fileType: t.Optional(t.String()),
-      historyChat: t.Optional(t.String())
+      historyChat: t.Optional(t.String()),
+      model: t.String(),
     })
   })
   .post('/create-message-image', async ({ body, error }) => {

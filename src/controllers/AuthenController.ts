@@ -550,7 +550,7 @@ const controllerAuthen = new Elysia()
       phone: t.String()
     })
   })
-    .post('/update-phone-mobile', async ({ body, error }) => {
+  .post('/update-phone-mobile', async ({ body, error }) => {
 
     const getUser = await UserModel.findById(body.id)
 
@@ -615,73 +615,73 @@ const controllerAuthen = new Elysia()
       picture: t.String()
     })
   })
-.post('/auth/google-mobile', async ({ body, error }) => {
-  try {
-    const idToken: string | undefined = body.idToken
-    if (!idToken) return error(400, 'Missing idToken')
+  .post('/auth/google-mobile', async ({ body, error }) => {
+    try {
+      const idToken: string | undefined = body.idToken
+      if (!idToken) return error(400, 'Missing idToken')
 
-    // 1) VERIFY chữ ký + audience
-    const oauth = new OAuth2Client()
-    const audiences = [
-      app.config.CLIENT_ID_GOOGLE,           // Web Client ID (bắt buộc)
-      app.config.CLIENT_ID_GOOGLE_ANDROID    // Android Client ID (nếu muốn chấp nhận cả mobile)
-    ].filter(Boolean)
+      // 1) VERIFY chữ ký + audience
+      const oauth = new OAuth2Client()
+      const audiences = [
+        app.config.CLIENT_ID_GOOGLE,           // Web Client ID (bắt buộc)
+        app.config.CLIENT_ID_GOOGLE_ANDROID    // Android Client ID (nếu muốn chấp nhận cả mobile)
+      ].filter(Boolean)
 
-    const ticket = await oauth.verifyIdToken({ idToken, audience: audiences })
-    const payload = ticket.getPayload()
-    if (!payload?.email) return error(401, 'Invalid Google token')
-    if (
-      payload.iss &&
-      !['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)
-    ) {
-      return error(401, 'Invalid issuer')
-    }
-
-    // 2) App logic: tạo tài khoản / trả token
-    const email = payload.email
-    const name = payload.name ?? email.split('@')[0]
-    const image = payload.picture ?? ''
-
-    let user = await UserModel.findOne({ email })
-    if (!user) {
-      user = await UserModel.create({
-        name,
-        email,
-        image,
-        active: true,
-        role: 'user',
-        confirm: true,
-        credit: 0,
-        phone: ''
-      })
-    } else if (user.active === false) {
-      return { status: 403, message: 'Tài khoản đã bị vô hiệu hóa' }
-    }
-
-    const exp = Math.floor(Date.now() / 1000) + 21600 // 6h
-    const token = app.service.swat.create(user.id, user.role, exp)
-
-    return {
-      message: 'success',
-      status: 200,
-      token,
-      email: user.email,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        name: user.name,
-        image: user.image
+      const ticket = await oauth.verifyIdToken({ idToken, audience: audiences })
+      const payload = ticket.getPayload()
+      if (!payload?.email) return error(401, 'Invalid Google token')
+      if (
+        payload.iss &&
+        !['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)
+      ) {
+        return error(401, 'Invalid issuer')
       }
+
+      // 2) App logic: tạo tài khoản / trả token
+      const email = payload.email
+      const name = payload.name ?? email.split('@')[0]
+      const image = payload.picture ?? ''
+
+      let user = await UserModel.findOne({ email })
+      if (!user) {
+        user = await UserModel.create({
+          name,
+          email,
+          image,
+          active: true,
+          role: 'user',
+          confirm: true,
+          credit: 0,
+          phone: ''
+        })
+      } else if (user.active === false) {
+        return { status: 403, message: 'Tài khoản đã bị vô hiệu hóa' }
+      }
+
+      const exp = Math.floor(Date.now() / 1000) + 21600 // 6h
+      const token = app.service.swat.create(user.id, user.role, exp)
+
+      return {
+        message: 'success',
+        status: 200,
+        token,
+        email: user.email,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          name: user.name,
+          image: user.image
+        }
+      }
+    } catch (e: any) {
+      return error(401, e?.message ?? 'Mobile auth failed')
     }
-  } catch (e: any) {
-    return error(401, e?.message ?? 'Mobile auth failed')
-  }
-}, {
-  body: t.Object({
-    idToken: t.String() // BẮT BUỘC phải có idToken, không cần code nữa
+  }, {
+    body: t.Object({
+      idToken: t.String() // BẮT BUỘC phải có idToken, không cần code nữa
+    })
   })
-})
   .put('/update-admin/:id', async ({ params, set, error }) => {
     const user = await User.findById(params.id)
     set.status = 404
