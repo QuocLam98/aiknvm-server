@@ -478,7 +478,7 @@ const controllerMessage = new Elysia()
       status: 0,
       history: body.historyChat,
       fileType: body.fileType,
-      model: body.model
+      models: body.model
     })
 
     const creditUsed = new Decimal(user.creditUsed)
@@ -1587,7 +1587,7 @@ const controllerMessage = new Elysia()
       status: 0,
       history: body.historyChat,
       fileType: body.fileType,
-      model: body.model
+      models: body.model
     })
 
     const creditUsed = new Decimal(user.creditUsed)
@@ -1741,7 +1741,7 @@ const controllerMessage = new Elysia()
       status: 0,
       history: historyId,
       fileType: body.fileType,
-      model: body.model
+      models: body.model
     })
 
     const creditUsed = new Decimal(user.creditUsed)
@@ -1867,7 +1867,7 @@ const controllerMessage = new Elysia()
       status: 0,
       history: historyId,
       fileType: body.fileType,
-      model: body.model
+      models: body.model
     })
 
     const creditUsed = new Decimal(user.creditUsed)
