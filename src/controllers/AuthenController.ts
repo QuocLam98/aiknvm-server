@@ -671,7 +671,8 @@ const controllerAuthen = new Elysia()
           email: user.email,
           role: user.role,
           name: user.name,
-          image: user.image
+          image: user.image,
+          phone: user.phone
         }
       }
     } catch (e: any) {
