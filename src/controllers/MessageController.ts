@@ -1241,9 +1241,8 @@ const controllerMessage = new Elysia()
     params: t.Object({ id: idMongodb })
   })
   .post('/create-message-mobile', async ({ body, error }) => {
-
+    // Lấy user
     const user = await UserModel.findById(body.id)
-
     if (!user) return error(404, 'fail')
 
     const bot = await BotModel.findById(body.bot)
@@ -1528,19 +1527,38 @@ const controllerMessage = new Elysia()
     else {
       messages.push(messageUsser)
     }
-
-    const completions = await app.service.openai.chat.completions.create({
-      model: 'gpt-5',
-      store: true,
-      messages: messages
-    })
+    let completions
+    if (body.model === 'gpt-5')
+    {
+      completions = await app.service.openai.chat.completions.create({
+        model: 'gpt-5',
+        store: true,
+        messages: messages
+      })
+    }
+    else {
+      completions = await app.service.openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        store: true,
+        messages: messages
+      })
+    }
 
     app.logger.info(completions)
 
     let priceTokenRequest = new Decimal(0)
     let priceTokenResponse = new Decimal(0)
-    const priceTokenInput = new Decimal(0.00000125)
-    const priceTokenOutput = new Decimal(0.00001)
+    let priceTokenInput
+    let priceTokenOutput
+    if (body.model === 'gpt-5') {
+      priceTokenInput = new Decimal(0.00000125)
+      priceTokenOutput = new Decimal(0.00001)
+    }
+    else {
+      priceTokenInput = new Decimal(0.00000025)
+      priceTokenOutput = new Decimal(0.000002)
+    }
+
 
     if (completions.usage !== undefined && completions.usage !== null) {
       priceTokenRequest = new Decimal(completions.usage.prompt_tokens);
@@ -1613,7 +1631,8 @@ const controllerMessage = new Elysia()
       content: t.String(),
       file: t.Optional(t.String()),
       fileType: t.Optional(t.String()),
-      historyChat: t.Optional(t.String())
+      historyChat: t.Optional(t.String()),
+      model: t.String(),
     })
   })
   .post('/create-message-gemini', async ({ body, error }) => {
@@ -1794,23 +1813,22 @@ const controllerMessage = new Elysia()
       }
     }
 
-    // ==== Gemini (refactored) build input & generate (mobile) =====
-    const includeTemplateMobile = !!(bot.templateMessage?.trim()) && !body.historyChat
-    const preparedMobile = await prepareGeminiInput({
+    // ==== Gemini (refactored) build input & generate =====
+    const includeTemplate = !!(bot.templateMessage?.trim()) && !body.historyChat
+    const prepared = await prepareGeminiInput({
       app,
       bot,
       historyId,
       userPrompt: body.content,
       fileUrl: body.file,
-      includeTemplate: includeTemplateMobile,
+      includeTemplate,
       MessageModel
     })
 
-    const modelRequested = body.model || 'gemini-2.5-pro'
     const completions = await app.service.gemini.models.generateContent({
-      model: modelRequested,
-      contents: preparedMobile.contents,
-      config: includeTemplateMobile ? { systemInstruction: bot.templateMessage } : undefined,
+      model: body.model,
+      contents: prepared.contents,
+      config: includeTemplate ? { systemInstruction: bot.templateMessage } : undefined,
     })
 
     let contentBot = ''
@@ -1819,7 +1837,8 @@ const controllerMessage = new Elysia()
       contentBot = parts.map((p: any) => p.text).join('\n')
     }
 
-    const pricing = computeGeminiPricing(completions?.usageMetadata, modelRequested)
+    // Pricing using helper
+    const pricing = computeGeminiPricing(completions?.usageMetadata, body.model)
 
     // Tạo history trước nếu chưa có (tránh tạo message với history rỗng)
     if (!historyId) {
@@ -1865,8 +1884,8 @@ const controllerMessage = new Elysia()
   }, {
     body: t.Object({
       id: t.String({ id: idMongodb }),
-      bot: t.String({ bot: idMongodb }),
       model: t.String(),
+      bot: t.String({ bot: idMongodb }),
       content: t.String(),
       file: t.Optional(t.String()),
       fileType: t.Optional(t.String()),
