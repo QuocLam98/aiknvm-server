@@ -15,7 +15,8 @@ interface IMessage {
     status: number,
     voice: string,
     active: boolean,
-    fileType: string
+    fileType: string,
+    models?: string
 }
 
 const MessageSchema = new Schema<IMessage>({
@@ -31,7 +32,8 @@ const MessageSchema = new Schema<IMessage>({
     creditCost: { type: Number, default: 0 },
     status: { type: Number, default: 0 },
     history: { type: Schema.Types.ObjectId, default: null  },
-    active: { type: Boolean, required: true}
+    active: { type: Boolean, required: true},
+    models: { type: String },
 }, {
     timestamps: true
 })
