@@ -146,7 +146,8 @@ const controllerBot = new Elysia()
       image: imageUrl,
       description: desc,
       status: Number(body.status),
-      priority: priority
+      priority: priority,
+      models: models
     });
 
     const botUpdate = await BotModel.findById(params.id);
