@@ -1616,7 +1616,7 @@ const controllerMessage = new Elysia()
       historyChat: t.Optional(t.String())
     })
   })
-  .post('/create-message-gemeni', async ({ body, error }) => {
+  .post('/create-message-gemini', async ({ body, error }) => {
 
     const existToken = app.service.swat.verify(body.token)
 
