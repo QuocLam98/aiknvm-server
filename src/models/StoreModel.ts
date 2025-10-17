@@ -10,6 +10,7 @@ interface IStore {
     price: string,
     fileType: string,
     type: string,
+    level?: string,
 }
 
 const StoreSchema = new Schema<IStore>({
@@ -20,6 +21,7 @@ const StoreSchema = new Schema<IStore>({
     fileType: { type: String },
     active: { type: Boolean, required: true},
     type: { type: String },
+    level: { type: String, default: 'basic' },
 }, {
     timestamps: true
 })

@@ -1,4 +1,5 @@
 import Elysia, { t } from 'elysia';
+import { levels } from 'pino';
 import app from '~/app'
 import StoreModel from '~/models/StoreModel';
 
@@ -41,7 +42,8 @@ const controllerStore = new Elysia()
           url: body.url,
           price: body.price,
           fileType: body.fileType,
-          type: body.type
+          type: body.type,
+          level: body.level || 'basic'
         })
 
         return createStore.toObject()
@@ -52,7 +54,8 @@ const controllerStore = new Elysia()
       url: t.String({ format: 'uri' }),
       price: t.Number({ minimum: 0 }),
       fileType: t.String(),
-      type: t.String()
+      type: t.String(),
+      level: t.Optional(t.String())
     })
   })
     .post('/upload-file-store', async ({ body }) => {
@@ -83,6 +86,7 @@ const controllerStore = new Elysia()
           description: body.description,
           price: body.price,
           type: body.type,
+          level: body.level,
         })
         const getStoreNew = await StoreModel.findById(body.id)
 
@@ -94,6 +98,7 @@ const controllerStore = new Elysia()
       description: t.String({ minLength: 2, maxLength: 500 }),
       price: t.Number({ minimum: 0 }),
       type: t.String(),
+      level: t.Optional(t.String())
     })
   })
     .put('remove-store', async ({ body, error }) => {
