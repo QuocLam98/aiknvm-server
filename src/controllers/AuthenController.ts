@@ -504,7 +504,8 @@ const controllerAuthen = new Elysia()
         confirm: true,
         credit: 2,
         phone: '',
-        image: payload.picture
+        image: payload.picture,
+        storeUsed: false
       })
       const token = app.service.swat.create(getUser.id, getUser.role, Math.floor(Date.now() / 1000) + 21600)
       return { message: 'success', status: 200, token, email: getUser.email, data: true, phone: getUser.phone }
@@ -652,7 +653,8 @@ const controllerAuthen = new Elysia()
           role: 'user',
           confirm: true,
           credit: 0,
-          phone: ''
+          phone: '',
+          storeUsed: false
         })
       } else if (user.active === false) {
         return { status: 403, message: 'Tài khoản đã bị vô hiệu hóa' }

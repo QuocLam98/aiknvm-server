@@ -15,7 +15,8 @@ interface IUser {
     creditUsed: number,
     confirm: Boolean,
     phone: string,
-    image: string
+    image: string,
+    storeUsed: boolean,
 }
 
 const UserSchema = new Schema<IUser>({
@@ -31,6 +32,7 @@ const UserSchema = new Schema<IUser>({
     role: {type: String, required: true},
     creditUsed: { type: Number, default: 0 },
     confirm: { type: Boolean, default: false},
+    storeUsed: { type: Boolean, default: false},
 }, {
     timestamps: true
 })
