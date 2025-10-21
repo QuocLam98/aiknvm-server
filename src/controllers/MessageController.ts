@@ -1001,7 +1001,7 @@ const controllerMessage = new Elysia()
     let generatedMime = 'image/png'
     let usageMeta: any
     try {
-      const parts: any[] = [{ text: body.content }]
+      const parts: any[] = [{ text: "bạn là 1 ai tạo ảnh chuyên nghiệp, nên hãy làm theo yêu cầu sau đây:" +body.content }]
       if (inlineImagePart) parts.push(inlineImagePart)
 
       app.logger.info({ route: '/create-message-image-pre-gemini', action: 'call-gemini-image', prompt: body.content, hasReference: !!inlineImagePart })
