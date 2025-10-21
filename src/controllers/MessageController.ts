@@ -49,12 +49,15 @@ const controllerMessage = new Elysia()
       MessageModel.countDocuments(filter)  // Đếm số lượng tài liệu phù hợp với filter
     ])
 
-    return {
+    const response = {
       message: 'success',
       status: 200,
       data: messages,
       total
     }
+
+    app.logger.info({ route: '/list-message', action: 'return', summary: { page, limit, total } })
+    return response
   }, {
     query: t.Object({
       page: t.Optional(t.Number({ minimum: 1 })),
@@ -78,7 +81,7 @@ const controllerMessage = new Elysia()
       MessageModel.countDocuments({}),
     ]);
 
-    return {
+    const response = {
       message: 'success',
       status: 200,
       data: messages,
@@ -90,7 +93,10 @@ const controllerMessage = new Elysia()
         hasNext: skip + messages.length < total,
         hasPrev: page > 1,
       },
-    };
+    }
+
+    app.logger.info({ route: '/list-message-mobile', action: 'return', summary: { page, limit, total } })
+    return response;
   }, {
     query: t.Object({
       page: t.Optional(t.Number({ minimum: 1 })),
@@ -102,7 +108,8 @@ const controllerMessage = new Elysia()
 
     const messages = await MessageModel.find({ history: params.id, active: true }).limit(50).sort({ createdAt: -1 })
 
-    return messages
+  app.logger.info({ route: '/list-message-history/:id', action: 'return', summary: { id: params.id, count: messages.length } })
+  return messages
   }, {
     params: t.Object({ id: idMongodb })
   })
@@ -112,13 +119,16 @@ const controllerMessage = new Elysia()
     const file = app.service.client.file(convertFileName)
     const fileBuffer = await body.file.arrayBuffer()
 
+    app.logger.info({ route: '/upload-file-chat', action: 'write-file-start', key: convertFileName })
     await file.write(Buffer.from(fileBuffer), {
       acl: "public-read",
       type: body.file.type
     })
 
-    const uploadFile = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/upload-file-chat', action: 'write-file-success', key: convertFileName })
 
+    const uploadFile = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/upload-file-chat', action: 'return', url: uploadFile })
     return uploadFile;
   }, {
     body: t.Object({
@@ -128,18 +138,27 @@ const controllerMessage = new Elysia()
   .post('/create-message', async ({ body, error }) => {
     const existToken = app.service.swat.verify(body.token)
 
-    if (!existToken) return {
-      status: 400
+    if (!existToken) {
+      app.logger.info({ route: '/create-message', action: 'invalid-token' })
+      return {
+        status: 400
+      }
     }
     const getIdUser = app.service.swat.parse(body.token).subject
 
     const user = await UserModel.findById(getIdUser)
 
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message', action: 'user-not-found', userId: getIdUser })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
 
-    if (!bot) return error(404, 'fail')
+    if (!bot) {
+      app.logger.info({ route: '/create-message', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'fail')
+    }
 
     if (user.creditUsed >= user.credit) {
       let history
@@ -178,7 +197,7 @@ const controllerMessage = new Elysia()
         status: messageCreated.status,
         history: history
       }
-      app.logger.info(messageData)
+      app.logger.info({ route: '/create-message', action: 'credit-insufficient', details: messageData })
       return messageData
     }
 
@@ -422,6 +441,7 @@ const controllerMessage = new Elysia()
     let completions
     if (body.model === 'gpt-5')
     {
+      app.logger.info({ route: '/create-message', action: 'call-openai-chat', model: 'gpt-5' })
       completions = await app.service.openai.chat.completions.create({
         model: 'gpt-5',
         store: true,
@@ -429,6 +449,7 @@ const controllerMessage = new Elysia()
       })
     }
     else {
+      app.logger.info({ route: '/create-message', action: 'call-openai-chat', model: 'gpt-5-mini' })
       completions = await app.service.openai.chat.completions.create({
         model: 'gpt-5-mini',
         store: true,
@@ -436,7 +457,7 @@ const controllerMessage = new Elysia()
       })
     }
 
-    app.logger.info(completions)
+    app.logger.info({ route: '/create-message', action: 'openai-response', usage: completions.usage })
 
     let priceTokenRequest = new Decimal(0)
     let priceTokenResponse = new Decimal(0)
@@ -514,7 +535,7 @@ const controllerMessage = new Elysia()
       history: history
     }
 
-    app.logger.info(messageData)
+    app.logger.info({ route: '/create-message', action: 'return', messageId: messageCreated._id, history })
     return messageData
 
   }, {
@@ -532,15 +553,24 @@ const controllerMessage = new Elysia()
 
     const existToken = app.service.swat.verify(body.token)
 
-    if (!existToken) return {
-      status: 400
+    if (!existToken) {
+      app.logger.info({ route: '/create-message-image', action: 'invalid-token' })
+      return {
+        status: 400
+      }
     }
     const getIdUser = app.service.swat.parse(body.token).subject
     const user = await UserModel.findById(getIdUser)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-image', action: 'user-not-found', userId: getIdUser })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'Bot not found')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-image', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'Bot not found')
+    }
 
     if (user.creditUsed >= user.credit) {
       const messageCreated = await MessageModel.create({
@@ -578,9 +608,11 @@ const controllerMessage = new Elysia()
         history: history
       }
 
+      app.logger.info({ route: '/create-message-image', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
 
+    app.logger.info({ route: '/create-message-image', action: 'call-openai-image-generate', prompt: body.content })
     const completions = await app.service.openai.images.generate({
       model: "dall-e-3",
       prompt: body.content,
@@ -588,11 +620,17 @@ const controllerMessage = new Elysia()
       response_format: 'b64_json'
     })
 
-    if (!completions.data) return error(404, 'fail')
+    if (!completions.data) {
+      app.logger.info({ route: '/create-message-image', action: 'openai-no-data' })
+      return error(404, 'fail')
+    }
 
     // Bước 1: Lấy base64
     const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
-    if (!base64Data) return error(404, 'fail')
+    if (!base64Data) {
+      app.logger.info({ route: '/create-message-image', action: 'openai-empty-base64' })
+      return error(404, 'fail')
+    }
     // Bước 2: Convert base64 thành buffer
     const buffer = Buffer.from(base64Data, 'base64');
 
@@ -602,10 +640,12 @@ const controllerMessage = new Elysia()
     // Bước 4: Upload lên S3
     const file = app.service.client.file(convertFileName);
 
+    app.logger.info({ route: '/create-message-image', action: 'write-generated-start', key: convertFileName })
     await file.write(buffer, {
       acl: "public-read",
       type: "image/png" // cố định vì OpenAI đang trả PNG
     });
+    app.logger.info({ route: '/create-message-image', action: 'write-generated-success', key: convertFileName })
     // Bước 5: Lấy URL
     const uploadFile = app.service.getUrl + convertFileName;
     // Tính toán chi phí credit
@@ -661,13 +701,16 @@ const controllerMessage = new Elysia()
     }
 
     // Return message data
-    return {
+    const response = {
       contentBot: uploadFile,
       createdAt: messageCreated.createdAt,
       history: history,
       _id: messageCreated._id,
       file: uploadFileUser,
     }
+
+    app.logger.info({ route: '/create-message-image', action: 'return', messageId: messageCreated._id })
+    return response
 
   }, {
     body: t.Object({
@@ -681,15 +724,24 @@ const controllerMessage = new Elysia()
 
     const existToken = app.service.swat.verify(body.token)
 
-    if (!existToken) return {
-      status: 400
+    if (!existToken) {
+      app.logger.info({ route: '/create-message-image-pre', action: 'invalid-token' })
+      return {
+        status: 400
+      }
     }
     const getIdUser = app.service.swat.parse(body.token).subject
     const user = await UserModel.findById(getIdUser)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-image-pre', action: 'user-not-found', userId: getIdUser })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'Bot not found')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-image-pre', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'Bot not found')
+    }
 
     if (user.creditUsed >= user.credit) {
       const messageCreated = await MessageModel.create({
@@ -711,12 +763,14 @@ const controllerMessage = new Elysia()
         history: body.historyChat
       }
 
+      app.logger.info({ route: '/create-message-image-pre', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
     let isEdit = false
     let completions
     if (body.file) {
       isEdit = true
+      app.logger.info({ route: '/create-message-image-pre', action: 'call-openai-image-edit', prompt: body.content })
       completions = await app.service.openai.images.edit({
         model: "gpt-image-1",
         image: body.file,
@@ -726,6 +780,7 @@ const controllerMessage = new Elysia()
       })
     }
     else {
+      app.logger.info({ route: '/create-message-image-pre', action: 'call-openai-image-generate', prompt: body.content })
       completions = await app.service.openai.images.generate({
         model: "gpt-image-1",
         prompt: body.content,
@@ -733,11 +788,17 @@ const controllerMessage = new Elysia()
         quality: "high",
       })
     }
-    if (!completions.data) return error(404, 'fail')
+    if (!completions.data) {
+      app.logger.info({ route: '/create-message-image-pre', action: 'openai-no-data', isEdit })
+      return error(404, 'fail')
+    }
 
     // Bước 1: Lấy base64
     const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
-    if (!base64Data) return error(404, 'fail')
+    if (!base64Data) {
+      app.logger.info({ route: '/create-message-image-pre', action: 'openai-empty-base64', isEdit })
+      return error(404, 'fail')
+    }
     // Bước 2: Convert base64 thành buffer
     const buffer = Buffer.from(base64Data, 'base64');
 
@@ -747,10 +808,12 @@ const controllerMessage = new Elysia()
     // Bước 4: Upload lên S3
     const file = app.service.client.file(convertFileName);
 
+    app.logger.info({ route: '/create-message-image-pre', action: 'write-generated-start', key: convertFileName })
     await file.write(buffer, {
       acl: "public-read",
       type: "image/png" // cố định vì OpenAI đang trả PNG
     });
+    app.logger.info({ route: '/create-message-image-pre', action: 'write-generated-success', key: convertFileName })
     // Bước 5: Lấy URL
     const uploadFile = app.service.getUrl + convertFileName;
     // Tính toán chi phí credit
@@ -770,16 +833,19 @@ const controllerMessage = new Elysia()
       const file = await app.service.client.file(convertFileName)
       const fileBuffer = await body.file.arrayBuffer()
 
+      app.logger.info({ route: '/create-message-image-pre', action: 'write-reference-start', key: convertFileName })
       await file.write(Buffer.from(fileBuffer), {
         acl: "public-read",
         type: body.file.type
       })
 
+      app.logger.info({ route: '/create-message-image-pre', action: 'write-reference-success', key: convertFileName })
+
       const uploadFileUser = app.service.getUrl + convertFileName
 
       await imageUrlToBase64(uploadFileUser)
 
-      messageCreated = await MessageModel.create({
+  messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
         contentUser: body.content,
@@ -834,13 +900,232 @@ const controllerMessage = new Elysia()
     }
 
     // Return message data
-    return {
+    const response = {
       contentBot: uploadFile,
       createdAt: messageCreated.createdAt,
       history: history,
       _id: messageCreated._id,
       file: uploadFileUser,
-    };
+    }
+
+    app.logger.info({ route: '/create-message-image-pre', action: 'return', messageId: messageCreated._id })
+    return response;
+
+  }, {
+    body: t.Object({
+      token: t.String(),
+      bot: t.String({ bot: idMongodb }),
+      content: t.String(),
+      historyChat: t.Optional(t.String({ historyChat: idMongodb })),
+      file: t.Optional(t.File()),
+    })
+  })
+  .post('/create-message-image-pre-gemini', async ({ body, error }) => {
+
+    const existToken = app.service.swat.verify(body.token)
+
+    if (!existToken) {
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'invalid-token' })
+      return {
+        status: 400
+      }
+    }
+    const getIdUser = app.service.swat.parse(body.token).subject
+    const user = await UserModel.findById(getIdUser)
+    if (!user) {
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'user-not-found', userId: getIdUser })
+      return error(404, 'fail')
+    }
+
+    const bot = await BotModel.findById(body.bot)
+    if (!bot) {
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'Bot not found')
+    }
+
+  if (user.creditUsed >= user.credit) {
+      const messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi',
+        tookenRequest: 0,
+        tookendResponse: 0,
+        creditCost: 0,
+        active: true,
+        history: body.historyChat
+      })
+
+      const messageData = {
+        contentBot: messageCreated.contentBot,
+        createdAt: messageCreated.createdAt,
+        _id: messageCreated._id,
+        history: body.historyChat
+      }
+
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'credit-insufficient', messageId: messageCreated._id })
+      return messageData
+    }
+
+    let referenceImageUrl: string | undefined
+    let inlineImagePart: any | undefined
+    if (body.file) {
+      if (!body.file.type.startsWith('image/')) {
+        app.logger.info({ route: '/create-message-image-pre-gemini', action: 'invalid-file-type', mime: body.file.type })
+        return error(400, 'File phải là định dạng ảnh')
+      }
+      const safeName = body.file.name.replace(/\s+/g, '')
+      const refKey = `File-Chat/${Date.now()}-${safeName}`
+      const refFile = app.service.client.file(refKey)
+      const refBuffer = Buffer.from(await body.file.arrayBuffer())
+
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-reference-start', key: refKey })
+      await refFile.write(refBuffer, {
+        acl: 'public-read',
+        type: body.file.type
+      })
+
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-reference-success', key: refKey })
+      referenceImageUrl = app.service.getUrl + refKey
+      await imageUrlToBase64(referenceImageUrl)
+
+      inlineImagePart = {
+        inlineData: {
+          mimeType: body.file.type,
+          data: refBuffer.toString('base64')
+        }
+      }
+    }
+
+    let generatedImageBase64: string | undefined
+    let generatedMime = 'image/png'
+    let usageMeta: any
+    try {
+      const parts: any[] = [{ text: body.content }]
+      if (inlineImagePart) parts.push(inlineImagePart)
+
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'call-gemini-image', prompt: body.content, hasReference: !!inlineImagePart })
+      const genResp = await app.service.gemini.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: [{ role: 'user', parts }]
+      })
+      usageMeta = (genResp as any)?.usageMetadata
+      if (genResp?.candidates?.length) {
+        outer: for (const cand of genResp.candidates) {
+          const cparts = cand.content?.parts || []
+          for (const p of cparts) {
+            if (p.inlineData?.data && p.inlineData?.mimeType?.startsWith('image/')) {
+              generatedImageBase64 = p.inlineData.data
+              generatedMime = p.inlineData.mimeType
+              break outer
+            }
+          }
+        }
+      }
+      if (!generatedImageBase64) {
+        const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='100%' height='100%' fill='#222'/><text x='50%' y='45%' fill='#fff' font-size='38' dominant-baseline='middle' text-anchor='middle'>Gemini Image</text><text x='50%' y='55%' fill='#0f0' font-size='22' dominant-baseline='middle' text-anchor='middle'>${body.content.replace(/</g,'&lt;').substring(0,55)}</text></svg>`
+        generatedImageBase64 = Buffer.from(svg).toString('base64')
+        generatedMime = 'image/svg+xml'
+      }
+    } catch (e) {
+  app.logger.error(e)
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='100%' height='100%' fill='#440'/><text x='50%' y='50%' fill='#fff' font-size='38' dominant-baseline='middle' text-anchor='middle'>Gemini Error</text></svg>`
+      generatedImageBase64 = Buffer.from(svg).toString('base64')
+      generatedMime = 'image/svg+xml'
+    }
+
+    const ext = generatedMime.includes('svg') ? '.svg'
+      : generatedMime.includes('jpeg') ? '.jpg'
+      : generatedMime.includes('webp') ? '.webp'
+      : '.png'
+    const convertFileName = `File-Chat/${Date.now()}-gemini${ext}`
+    const file = app.service.client.file(convertFileName)
+    const buffer = Buffer.from(generatedImageBase64, 'base64')
+
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-generated-start', key: convertFileName })
+    await file.write(buffer, {
+      acl: 'public-read',
+      type: generatedMime
+    })
+    const uploadFile = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-generated-success', key: convertFileName })
+
+    // Pricing per product sheet: input $0.30 / 1M tokens, output $0.039 per generated image (<=1024x1024 ~1290 tokens).
+    const USD_PER_M_INPUT = new Decimal(0.30)
+    const USD_PER_IMAGE_OUTPUT = new Decimal(0.039)
+    const promptTokens = new Decimal(usageMeta?.promptTokenCount || 0)
+    const rawOutputTokens = usageMeta?.candidatesTokenCount
+    const outputTokens = new Decimal(
+      typeof rawOutputTokens === 'number' && rawOutputTokens > 0 ? rawOutputTokens : (generatedImageBase64 ? 1290 : 0)
+    )
+
+    const usdInput = promptTokens.mul(USD_PER_M_INPUT).div(1_000_000)
+    const usdOutput = generatedImageBase64 ? USD_PER_IMAGE_OUTPUT : new Decimal(0)
+    const totalUsd = usdInput.add(usdOutput)
+    const creditCost = totalUsd.mul(5)
+
+    let messageCreated
+    if (body.file) {
+  messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: promptTokens.toNumber(),
+        tookendResponse: outputTokens.toNumber(),
+        creditCost: creditCost.toNumber(),
+        active: true,
+        history: body.historyChat,
+        fileUser: referenceImageUrl
+      })
+    } else {
+      messageCreated = await MessageModel.create({
+        user: user._id,
+        bot: body.bot,
+        contentUser: body.content,
+        contentBot: uploadFile,
+        tookenRequest: promptTokens.toNumber(),
+        tookendResponse: outputTokens.toNumber(),
+        creditCost: creditCost.toNumber(),
+        active: true,
+        history: body.historyChat
+      })
+    }
+
+    const creditUsedDecimal = new Decimal(user.creditUsed)
+    const updatedCreditUsed = creditUsedDecimal.add(creditCost)
+
+    await user.updateOne({
+      creditUsed: updatedCreditUsed.toNumber(),
+    })
+
+    let history
+
+    if (!body.historyChat) {
+      const historyCreate = await HistoryChat.create({
+        user: user._id,
+        bot: bot._id,
+        active: true,
+        name: body.content
+      })
+      if (historyCreate) {
+        history = historyCreate._id.toString()
+      }
+    }
+    else {
+      history = body.historyChat
+    }
+
+    const response = {
+      contentBot: uploadFile,
+      createdAt: messageCreated.createdAt,
+      history: history,
+      _id: messageCreated._id,
+      file: referenceImageUrl,
+    }
+
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'return', messageId: messageCreated._id })
+    return response;
 
   }, {
     body: t.Object({
@@ -855,16 +1140,22 @@ const controllerMessage = new Elysia()
 
     const getMessage = await MessageModel.findById(body.id)
 
-    if (!getMessage) return error(404, 'fail')
+    if (!getMessage) {
+      app.logger.info({ route: '/update-message', action: 'message-not-found', messageId: body.id })
+      return error(404, 'fail')
+    }
 
     await getMessage.updateOne({
       status: body.status
     })
 
-    return {
+    const response = {
       status: 200,
       message: 'success'
     }
+
+    app.logger.info({ route: '/update-message', action: 'return', messageId: body.id, status: body.status })
+    return response
 
   }, {
     body: t.Object({
@@ -876,7 +1167,10 @@ const controllerMessage = new Elysia()
 
     const getMessage = await MessageModel.findById(body.id)
 
-    if (!getMessage) return error(404, 'fail')
+    if (!getMessage) {
+      app.logger.info({ route: '/update-message-history', action: 'message-not-found', messageId: body.id })
+      return error(404, 'fail')
+    }
 
     await getMessage.updateOne({
       history: body.history
@@ -884,7 +1178,9 @@ const controllerMessage = new Elysia()
 
     const messageUpdate = await MessageModel.findById(body.id)
 
-    return messageUpdate?.toObject()
+  const response = messageUpdate?.toObject()
+  app.logger.info({ route: '/update-message-history', action: 'return', messageId: body.id, history: body.history })
+  return response
 
   }, {
     body: t.Object({
@@ -896,17 +1192,26 @@ const controllerMessage = new Elysia()
 
     const messageFind = await MessageModel.findById(body.id)
 
-    if (!messageFind) return error(404)
-
-    const getUser = await UserModel.findById(messageFind.user)
-
-    if (!getUser) return error(404)
-
-    if (getUser.creditUsed >= getUser.credit) return {
-      status: 404,
-      message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+    if (!messageFind) {
+      app.logger.info({ route: '/create-voice', action: 'message-not-found', messageId: body.id })
+      return error(404)
     }
 
+    const getUser = await UserModel.findById(messageFind.user)
+    if (!getUser) {
+      app.logger.info({ route: '/create-voice', action: 'user-not-found', userId: messageFind.user })
+      return error(404)
+    }
+
+    if (getUser.creditUsed >= getUser.credit) {
+      app.logger.info({ route: '/create-voice', action: 'credit-insufficient', userId: getUser._id })
+      return {
+        status: 404,
+        message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+      }
+    }
+
+    app.logger.info({ route: '/create-voice', action: 'call-openai-tts', messageId: body.id })
     const mp3 = await app.service.openai.audio.speech.create({
       model: "gpt-4o-mini-tts",
       voice: 'alloy',
@@ -917,12 +1222,14 @@ const controllerMessage = new Elysia()
     const file = app.service.client.file(convertFileName)
     const fileBuffer = Buffer.from(await mp3.arrayBuffer());
 
+    app.logger.info({ route: '/create-voice', action: 'write-audio-start', key: convertFileName })
     await file.write(Buffer.from(fileBuffer), {
       acl: "public-read",
       type: 'audio/mpeg'
     })
 
     const uploadFileUser = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/create-voice', action: 'write-audio-success', key: convertFileName })
 
     await messageFind.updateOne({
       voice: uploadFileUser
@@ -944,10 +1251,13 @@ const controllerMessage = new Elysia()
       creditUsed: costAudio.add(new Decimal(getUser.creditUsed))
     })
 
-    return {
+    const response = {
       status: 200,
       url: uploadFileUser
     }
+
+    app.logger.info({ route: '/create-voice', action: 'return', messageId: body.id, url: uploadFileUser })
+    return response
 
   }, {
     body: t.Object({
@@ -999,17 +1309,27 @@ const controllerMessage = new Elysia()
     }
     
     const messageFind = await MessageModel.findById(body.id)
-    if (!messageFind) return error(404)
+    if (!messageFind) {
+      app.logger.info({ route: '/create-voice-gemini', action: 'message-not-found', messageId: body.id })
+      return error(404)
+    }
 
     const getUser = await UserModel.findById(messageFind.user)
-    if (!getUser) return error(404)
+    if (!getUser) {
+      app.logger.info({ route: '/create-voice-gemini', action: 'user-not-found', userId: messageFind.user })
+      return error(404)
+    }
 
-    if (getUser.creditUsed >= getUser.credit) return {
-      status: 404,
-      message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+    if (getUser.creditUsed >= getUser.credit) {
+      app.logger.info({ route: '/create-voice-gemini', action: 'credit-insufficient', userId: getUser._id })
+      return {
+        status: 404,
+        message: 'Bạn đã sử dụng hết số credit, hãy vui lòng mua thêm để sử dụng dịch vụ của chúng tôi'
+      }
     }
 
     // Generate audio using Gemini TTS
+    app.logger.info({ route: '/create-voice-gemini', action: 'call-gemini-tts', messageId: body.id })
     const audio = await app.service.gemini.models.generateContent({
       model: 'gemini-2.5-flash-preview-tts',
       contents: [{ role: 'user', parts: [{ text: body.content }]}],
@@ -1031,7 +1351,10 @@ const controllerMessage = new Elysia()
         break
       }
     }
-    if (!audioData) return error(500, 'No audio generated')
+    if (!audioData) {
+      app.logger.info({ route: '/create-voice-gemini', action: 'no-audio-generated' })
+      return error(500, 'No audio generated')
+    }
 
     // Prepare buffer for upload, wrapping raw PCM (audio/l16|audio/pcm) into WAV
     const mimeInfo = parseAudioMime(mimeType)
@@ -1063,12 +1386,14 @@ const controllerMessage = new Elysia()
     const convertFileName = `File-Audio/${getUser.email}/` + Date.now() + '-gemini' + ext
     const file = app.service.client.file(convertFileName)
 
+    app.logger.info({ route: '/create-voice-gemini', action: 'write-audio-start', key: convertFileName })
     await file.write(uploadBuffer, {
       acl: "public-read",
       type: uploadMime
     })
 
     const uploadFileUser = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/create-voice-gemini', action: 'write-audio-success', key: convertFileName })
 
     await messageFind.updateOne({
       voice: uploadFileUser
@@ -1139,10 +1464,13 @@ const controllerMessage = new Elysia()
       creditUsed: new Decimal(getUser.creditUsed).add(finalCharge)
     })
 
-    return {
+    const response = {
       status: 200,
       url: uploadFileUser
     }
+
+    app.logger.info({ route: '/create-voice-gemini', action: 'return', messageId: body.id, url: uploadFileUser })
+    return response
 
   }, {
     body: t.Object({
@@ -1152,6 +1480,7 @@ const controllerMessage = new Elysia()
   })
   .post('/createmessage-test', async ({ body, error }) => {
 
+    app.logger.info({ route: '/createmessage-test', action: 'call-openai-chat', prompt: body.content })
     const completions = await app.service.openai.chat.completions.create({
       model: 'chatgpt-4o-latest',
       store: true,
@@ -1161,6 +1490,7 @@ const controllerMessage = new Elysia()
       }]
     })
 
+    app.logger.info({ route: '/createmessage-test', action: 'return', usage: completions.usage })
     return completions
 
   }, {
@@ -1222,7 +1552,9 @@ const controllerMessage = new Elysia()
       } catch { /* noop */ }
     }
 
-    return { duration: duration ?? 0 } // duration tính bằng giây (số thực)
+  const response = { duration: duration ?? 0 }
+  app.logger.info({ route: '/duration', action: 'return', url: body.url, duration: response.duration })
+  return response // duration tính bằng giây (số thực)
   }, {
     body: t.Object({
       url: t.String()
@@ -1231,24 +1563,34 @@ const controllerMessage = new Elysia()
   .put('/delete-message/:id', async ({ params, error }) => {
     const getMessage = await MessageModel.findById(params.id)
 
-    if (!getMessage) return error(404)
+    if (!getMessage) {
+      app.logger.info({ route: '/delete-message/:id', action: 'message-not-found', messageId: params.id })
+      return error(404)
+    }
 
     await getMessage.updateOne({
       active: false
     })
 
-    return getMessage
+  app.logger.info({ route: '/delete-message/:id', action: 'return', messageId: params.id })
+  return getMessage
   }, {
     params: t.Object({ id: idMongodb })
   })
   .post('/create-message-mobile', async ({ body, error }) => {
     // Lấy user
     const user = await UserModel.findById(body.id)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-mobile', action: 'user-not-found', userId: body.id })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
 
-    if (!bot) return error(404, 'fail')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-mobile', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'fail')
+    }
 
     if (user.creditUsed >= user.credit) {
       let history
@@ -1287,7 +1629,7 @@ const controllerMessage = new Elysia()
         status: messageCreated.status,
         history: history
       }
-      app.logger.info(messageData)
+      app.logger.info({ route: '/create-message-mobile', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
 
@@ -1531,6 +1873,7 @@ const controllerMessage = new Elysia()
     let completions
     if (body.model === 'gpt-5')
     {
+      app.logger.info({ route: '/create-message-mobile', action: 'call-openai-chat', model: 'gpt-5' })
       completions = await app.service.openai.chat.completions.create({
         model: 'gpt-5',
         store: true,
@@ -1538,6 +1881,7 @@ const controllerMessage = new Elysia()
       })
     }
     else {
+      app.logger.info({ route: '/create-message-mobile', action: 'call-openai-chat', model: 'gpt-5-mini' })
       completions = await app.service.openai.chat.completions.create({
         model: 'gpt-5-mini',
         store: true,
@@ -1545,7 +1889,7 @@ const controllerMessage = new Elysia()
       })
     }
 
-    app.logger.info(completions)
+    app.logger.info({ route: '/create-message-mobile', action: 'openai-response', usage: completions.usage })
 
     let priceTokenRequest = new Decimal(0)
     let priceTokenResponse = new Decimal(0)
@@ -1623,7 +1967,7 @@ const controllerMessage = new Elysia()
       history: history
     }
 
-    app.logger.info(messageData)
+  app.logger.info({ route: '/create-message-mobile', action: 'return', messageId: messageCreated._id, history })
     return messageData
 
   }, {
@@ -1641,18 +1985,27 @@ const controllerMessage = new Elysia()
 
     const existToken = app.service.swat.verify(body.token)
 
-    if (!existToken) return {
-      status: 400
+    if (!existToken) {
+      app.logger.info({ route: '/create-message-gemini', action: 'invalid-token' })
+      return {
+        status: 400
+      }
     }
     const getIdUser = app.service.swat.parse(body.token).subject
 
     const user = await UserModel.findById(getIdUser)
 
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-gemini', action: 'user-not-found', userId: getIdUser })
+      return error(404, 'fail')
+    }
 
     // Lấy bot
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'fail')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-gemini', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'fail')
+    }
 
     // Chuẩn hoá historyChat: coi chuỗi rỗng hoặc khoảng trắng như không truyền
     let historyId: string | undefined = (body.historyChat && body.historyChat.trim() !== '') ? body.historyChat.trim() : undefined
@@ -1669,7 +2022,7 @@ const controllerMessage = new Elysia()
         if (historyCreate) historyId = historyCreate._id.toString()
       }
 
-      const messageCreated = await MessageModel.create({
+  const messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
         contentUser: body.content,
@@ -1681,13 +2034,15 @@ const controllerMessage = new Elysia()
         history: historyId
       })
 
-      return {
+      const response = {
         contentBot: messageCreated.contentBot,
         createdAt: messageCreated.createdAt,
         _id: messageCreated._id,
         status: messageCreated.status,
         history: historyId
       }
+      app.logger.info({ route: '/create-message-gemini', action: 'credit-insufficient', messageId: messageCreated._id })
+      return response
     }
 
     // ==== Gemini (refactored) build input & generate =====
@@ -1702,6 +2057,7 @@ const controllerMessage = new Elysia()
       MessageModel
     })
 
+    app.logger.info({ route: '/create-message-gemini', action: 'call-gemini', model: body.model, includeTemplate })
     const completions = await app.service.gemini.models.generateContent({
       model: body.model,
       contents: prepared.contents,
@@ -1757,7 +2113,7 @@ const controllerMessage = new Elysia()
       history: historyId
     }
 
-    app.logger.info(messageData)
+    app.logger.info({ route: '/create-message-gemini', action: 'return', messageId: messageCreated._id, history: historyId })
     return messageData
   }, {
     body: t.Object({
@@ -1774,11 +2130,17 @@ const controllerMessage = new Elysia()
 
     // Lấy user
     const user = await UserModel.findById(body.id)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-mobile-gemini', action: 'user-not-found', userId: body.id })
+      return error(404, 'fail')
+    }
 
     // Lấy bot
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'fail')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-mobile-gemini', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'fail')
+    }
 
     // Chuẩn hoá historyChat: coi chuỗi rỗng hoặc khoảng trắng như không truyền
     let historyId: string | undefined = (body.historyChat && body.historyChat.trim() !== '') ? body.historyChat.trim() : undefined
@@ -1795,7 +2157,7 @@ const controllerMessage = new Elysia()
         if (historyCreate) historyId = historyCreate._id.toString()
       }
 
-      const messageCreated = await MessageModel.create({
+  const messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
         contentUser: body.content,
@@ -1807,17 +2169,20 @@ const controllerMessage = new Elysia()
         history: historyId
       })
 
-      return {
+      const response = {
         contentBot: messageCreated.contentBot,
         createdAt: messageCreated.createdAt,
         _id: messageCreated._id,
         status: messageCreated.status,
         history: historyId
       }
+      app.logger.info({ route: '/create-message-mobile-gemini', action: 'credit-insufficient', messageId: messageCreated._id })
+      return response
     }
 
     // ==== Gemini (refactored) build input & generate =====
     const includeTemplate = !!(bot.templateMessage?.trim()) && !body.historyChat
+    app.logger.info({ route: '/create-message-mobile-gemini', action: 'prepare-input', includeTemplate, hasFile: !!body.file })
     const prepared = await prepareGeminiInput({
       app,
       bot,
@@ -1828,6 +2193,7 @@ const controllerMessage = new Elysia()
       MessageModel
     })
 
+    app.logger.info({ route: '/create-message-mobile-gemini', action: 'call-gemini', model: body.model })
     const completions = await app.service.gemini.models.generateContent({
       model: body.model,
       contents: prepared.contents,
@@ -1883,7 +2249,7 @@ const controllerMessage = new Elysia()
       history: historyId
     }
 
-    app.logger.info(messageData)
+  app.logger.info({ route: '/create-message-mobile-gemini', action: 'return', messageId: messageCreated._id, history: historyId })
     return messageData
   }, {
     body: t.Object({
@@ -1899,10 +2265,16 @@ const controllerMessage = new Elysia()
   .post('/create-message-image-mobile', async ({ body, error }) => {
 
     const user = await UserModel.findById(body.id)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-image-mobile', action: 'user-not-found', userId: body.id })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'Bot not found')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-image-mobile', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'Bot not found')
+    }
 
     if (user.creditUsed >= user.credit) {
       const messageCreated = await MessageModel.create({
@@ -1940,9 +2312,11 @@ const controllerMessage = new Elysia()
         history: history
       }
 
+      app.logger.info({ route: '/create-message-image-mobile', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
 
+    app.logger.info({ route: '/create-message-image-mobile', action: 'call-openai-image-generate', prompt: body.content })
     const completions = await app.service.openai.images.generate({
       model: "dall-e-3",
       prompt: body.content,
@@ -1950,11 +2324,17 @@ const controllerMessage = new Elysia()
       response_format: 'b64_json'
     })
 
-    if (!completions.data) return error(404, 'fail')
+    if (!completions.data) {
+      app.logger.info({ route: '/create-message-image-mobile', action: 'openai-no-data' })
+      return error(404, 'fail')
+    }
 
     // Bước 1: Lấy base64
     const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
-    if (!base64Data) return error(404, 'fail')
+    if (!base64Data) {
+      app.logger.info({ route: '/create-message-image-mobile', action: 'openai-empty-base64' })
+      return error(404, 'fail')
+    }
     // Bước 2: Convert base64 thành buffer
     const buffer = Buffer.from(base64Data, 'base64');
 
@@ -1964,10 +2344,12 @@ const controllerMessage = new Elysia()
     // Bước 4: Upload lên S3
     const file = app.service.client.file(convertFileName);
 
+    app.logger.info({ route: '/create-message-image-mobile', action: 'write-generated-start', key: convertFileName })
     await file.write(buffer, {
       acl: "public-read",
       type: "image/png" // cố định vì OpenAI đang trả PNG
     });
+    app.logger.info({ route: '/create-message-image-mobile', action: 'write-generated-success', key: convertFileName })
     // Bước 5: Lấy URL
     const uploadFile = app.service.getUrl + convertFileName;
     // Tính toán chi phí credit
@@ -2023,13 +2405,16 @@ const controllerMessage = new Elysia()
     }
 
     // Return message data
-    return {
+    const response = {
       contentBot: uploadFile,
       createdAt: messageCreated.createdAt,
       history: history,
       _id: messageCreated._id,
       file: uploadFileUser,
     }
+
+    app.logger.info({ route: '/create-message-image-mobile', action: 'return', messageId: messageCreated._id })
+    return response
 
   }, {
     body: t.Object({
@@ -2042,10 +2427,16 @@ const controllerMessage = new Elysia()
   .post('/create-message-image-pre-mobile', async ({ body, error }) => {
 
     const user = await UserModel.findById(body.id)
-    if (!user) return error(404, 'fail')
+    if (!user) {
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'user-not-found', userId: body.id })
+      return error(404, 'fail')
+    }
 
     const bot = await BotModel.findById(body.bot)
-    if (!bot) return error(404, 'Bot not found')
+    if (!bot) {
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'bot-not-found', botId: body.bot })
+      return error(404, 'Bot not found')
+    }
 
     if (user.creditUsed >= user.credit) {
       const messageCreated = await MessageModel.create({
@@ -2067,12 +2458,14 @@ const controllerMessage = new Elysia()
         history: body.historyChat
       }
 
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
     let isEdit = false
     let completions
     if (body.file) {
       isEdit = true
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'call-openai-image-edit', prompt: body.content })
       completions = await app.service.openai.images.edit({
         model: "gpt-image-1",
         image: body.file,
@@ -2082,6 +2475,7 @@ const controllerMessage = new Elysia()
       })
     }
     else {
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'call-openai-image-generate', prompt: body.content })
       completions = await app.service.openai.images.generate({
         model: "gpt-image-1",
         prompt: body.content,
@@ -2089,11 +2483,17 @@ const controllerMessage = new Elysia()
         quality: "high",
       })
     }
-    if (!completions.data) return error(404, 'fail')
+    if (!completions.data) {
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'openai-no-data', isEdit })
+      return error(404, 'fail')
+    }
 
     // Bước 1: Lấy base64
     const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
-    if (!base64Data) return error(404, 'fail')
+    if (!base64Data) {
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'openai-empty-base64', isEdit })
+      return error(404, 'fail')
+    }
     // Bước 2: Convert base64 thành buffer
     const buffer = Buffer.from(base64Data, 'base64');
 
@@ -2103,10 +2503,12 @@ const controllerMessage = new Elysia()
     // Bước 4: Upload lên S3
     const file = app.service.client.file(convertFileName);
 
+    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-generated-start', key: convertFileName })
     await file.write(buffer, {
       acl: "public-read",
       type: "image/png" // cố định vì OpenAI đang trả PNG
     });
+    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-generated-success', key: convertFileName })
     // Bước 5: Lấy URL
     const uploadFile = app.service.getUrl + convertFileName;
     // Tính toán chi phí credit
@@ -2126,10 +2528,13 @@ const controllerMessage = new Elysia()
       const file = await app.service.client.file(convertFileName)
       const fileBuffer = await body.file.arrayBuffer()
 
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-reference-start', key: convertFileName })
       await file.write(Buffer.from(fileBuffer), {
         acl: "public-read",
         type: body.file.type
       })
+
+      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-reference-success', key: convertFileName })
 
       const uploadFileUser = app.service.getUrl + convertFileName
 
@@ -2190,13 +2595,16 @@ const controllerMessage = new Elysia()
     }
 
     // Return message data
-    return {
+    const response = {
       contentBot: uploadFile,
       createdAt: messageCreated.createdAt,
       history: history,
       _id: messageCreated._id,
       file: uploadFileUser,
     };
+
+    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'return', messageId: messageCreated._id })
+    return response;
 
   }, {
     body: t.Object({
