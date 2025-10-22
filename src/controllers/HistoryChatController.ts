@@ -1,4 +1,5 @@
 import Elysia, { t } from 'elysia'
+import { Types } from 'mongoose'
 import BotModel from '~/models/BotModel'
 import UserModel from '~/models/UserModel'
 import HistoryChat from '~/models/HistoryChat'
@@ -43,14 +44,20 @@ const controllerHistoryChat = new Elysia()
     if (!exist) return error(404, 'fail')
 
     // Hard delete history and cascade delete messages with the same history id
-    await Promise.all([
-      HistoryChat.deleteOne({ _id: body.id }),
-      MessageModel.deleteMany({ history: body.id })
+    const historyObjectId = new Types.ObjectId(body.id)
+    const [historyRes, messagesRes] = await Promise.all([
+      HistoryChat.deleteOne({ _id: historyObjectId }),
+      // Be tolerant of legacy records that may have stored history as string
+      MessageModel.deleteMany({ $or: [ { history: historyObjectId }, { history: body.id } ] })
     ])
 
     return {
       status: 200,
-      message: 'success'
+      message: 'success',
+      deleted: {
+        history: (historyRes as any)?.deletedCount ?? undefined,
+        messages: (messagesRes as any)?.deletedCount ?? undefined,
+      }
     }
   }, {
     body: t.Object({
