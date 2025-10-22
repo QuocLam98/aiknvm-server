@@ -1004,10 +1004,10 @@ const controllerMessage = new Elysia()
       const parts: any[] = [{ text: "bạn là 1 ai tạo ảnh chuyên nghiệp, nên hãy tạo ảnh theo nội dung yêu cầu sau đây:" + body.content }]
       if (inlineImagePart) parts.push(inlineImagePart)
 
-      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'call-gemini-image', prompt: body.content, hasReference: !!inlineImagePart })
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'call-gemini-image', prompt: parts, hasReference: !!inlineImagePart })
       const genResp = await app.service.gemini.models.generateContent({
         model: 'gemini-2.5-flash-image',
-        contents: [{ role: 'user', parts }]
+        contents: parts
       })
       usageMeta = (genResp as any)?.usageMetadata
       if (genResp?.candidates?.length) {
