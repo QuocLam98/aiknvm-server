@@ -921,7 +921,7 @@ const controllerMessage = new Elysia()
     })
   })
   .post('/create-message-image-pre-gemini', async ({ body, error }) => {
-
+    let history
     const existToken = app.service.swat.verify(body.token)
 
     if (!existToken) {
@@ -944,6 +944,22 @@ const controllerMessage = new Elysia()
     }
 
   if (user.creditUsed >= user.credit) {
+
+    if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
       const messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
@@ -1098,8 +1114,6 @@ const controllerMessage = new Elysia()
     await user.updateOne({
       creditUsed: updatedCreditUsed.toNumber(),
     })
-
-    let history
 
     if (!body.historyChat) {
       const historyCreate = await HistoryChat.create({
