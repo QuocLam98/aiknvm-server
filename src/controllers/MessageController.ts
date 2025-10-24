@@ -2273,7 +2273,7 @@ const controllerMessage = new Elysia()
       content: t.String(),
       file: t.Optional(t.String()),
       fileType: t.Optional(t.String()),
-      historyChat: t.Optional(t.String())
+      historyChat: t.Optional(t.String()),
     })
   })
   .post('/create-message-image-mobile', async ({ body, error }) => {
@@ -2438,21 +2438,37 @@ const controllerMessage = new Elysia()
       historyChat: t.Optional(t.String({ historyChat: idMongodb })),
     })
   })
-  .post('/create-message-image-pre-mobile', async ({ body, error }) => {
-
+  .post('/create-message-image-pre-gemini-mobile', async ({ body, error }) => {
+    let history
     const user = await UserModel.findById(body.id)
     if (!user) {
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'user-not-found', userId: body.id })
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'user-not-found', userId: body.id })
       return error(404, 'fail')
     }
 
     const bot = await BotModel.findById(body.bot)
     if (!bot) {
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'bot-not-found', botId: body.bot })
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'bot-not-found', botId: body.bot })
       return error(404, 'Bot not found')
     }
 
-    if (user.creditUsed >= user.credit) {
+  if (user.creditUsed >= user.credit) {
+
+    if (!body.historyChat) {
+        const historyCreate = await HistoryChat.create({
+          user: user._id,
+          bot: bot._id,
+          active: true,
+          name: body.content
+        })
+        if (historyCreate) {
+          history = historyCreate._id.toString()
+        }
+      }
+      else {
+        history = body.historyChat
+      }
+
       const messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
@@ -2472,126 +2488,141 @@ const controllerMessage = new Elysia()
         history: body.historyChat
       }
 
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'credit-insufficient', messageId: messageCreated._id })
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'credit-insufficient', messageId: messageCreated._id })
       return messageData
     }
-    let isEdit = false
-    let completions
+
+    let referenceImageUrl: string | undefined
+    let inlineImagePart: any | undefined
     if (body.file) {
-      isEdit = true
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'call-openai-image-edit', prompt: body.content })
-      completions = await app.service.openai.images.edit({
-        model: "gpt-image-1",
-        image: body.file,
-        prompt: body.content,
-        size: "1024x1024",
-        quality: 'high',
-      })
-    }
-    else {
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'call-openai-image-generate', prompt: body.content })
-      completions = await app.service.openai.images.generate({
-        model: "gpt-image-1",
-        prompt: body.content,
-        size: "1024x1024",
-        quality: "high",
-      })
-    }
-    if (!completions.data) {
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'openai-no-data', isEdit })
-      return error(404, 'fail')
-    }
+      if (!body.file.type.startsWith('image/')) {
+        app.logger.info({ route: '/create-message-image-pre-gemini', action: 'invalid-file-type', mime: body.file.type })
+        return error(400, 'File phải là định dạng ảnh')
+      }
+      const safeName = body.file.name.replace(/\s+/g, '')
+      const refKey = `File-Chat/${Date.now()}-${safeName}`
+      const refFile = app.service.client.file(refKey)
+      const refBuffer = Buffer.from(await body.file.arrayBuffer())
 
-    // Bước 1: Lấy base64
-    const base64Data = completions.data[0].b64_json; // thay yourResponse bằng object bạn nhận từ API OpenAI
-    if (!base64Data) {
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'openai-empty-base64', isEdit })
-      return error(404, 'fail')
-    }
-    // Bước 2: Convert base64 thành buffer
-    const buffer = Buffer.from(base64Data, 'base64');
-
-    // Bước 3: Đặt tên file (ví dụ .png vì OpenAI image thường là PNG)
-    const convertFileName = "File-Chat/" + `${Date.now()}.png`;
-
-    // Bước 4: Upload lên S3
-    const file = app.service.client.file(convertFileName);
-
-    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-generated-start', key: convertFileName })
-    await file.write(buffer, {
-      acl: "public-read",
-      type: "image/png" // cố định vì OpenAI đang trả PNG
-    });
-    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-generated-success', key: convertFileName })
-    // Bước 5: Lấy URL
-    const uploadFile = app.service.getUrl + convertFileName;
-    // Tính toán chi phí credit
-    let costImage
-    let creditCost
-    creditCost = calculateCost(completions.usage, isEdit);
-
-    // Chuyển creditCost thành Decimal nếu cần
-    const creditCostDecimal = new Decimal(creditCost);
-
-    // Tạo tin nhắn
-    let messageCreated
-    let uploadFileUser
-    if (body.file) {
-      const fileName = await body.file.name.replace(/\s+/g, '')
-      const convertFileName = "File-Chat/" + Date.now() + fileName
-      const file = await app.service.client.file(convertFileName)
-      const fileBuffer = await body.file.arrayBuffer()
-
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-reference-start', key: convertFileName })
-      await file.write(Buffer.from(fileBuffer), {
-        acl: "public-read",
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-reference-start', key: refKey })
+      await refFile.write(refBuffer, {
+        acl: 'public-read',
         type: body.file.type
       })
 
-      app.logger.info({ route: '/create-message-image-pre-mobile', action: 'write-reference-success', key: convertFileName })
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-reference-success', key: refKey })
+      referenceImageUrl = app.service.getUrl + refKey
+      await imageUrlToBase64(referenceImageUrl)
 
-      const uploadFileUser = app.service.getUrl + convertFileName
+      inlineImagePart = {
+        inlineData: {
+          mimeType: body.file.type,
+          data: refBuffer.toString('base64')
+        }
+      }
+    }
 
-      await imageUrlToBase64(uploadFileUser)
+    let generatedImageBase64: string | undefined
+    let generatedMime = 'image/png'
+    let usageMeta: any
+    try {
+      const parts: any[] = [{ text: "bạn là 1 ai tạo ảnh chuyên nghiệp, nên hãy tạo ảnh theo nội dung yêu cầu sau đây:" + body.content }]
+      if (inlineImagePart) parts.push(inlineImagePart)
 
-      messageCreated = await MessageModel.create({
+      app.logger.info({ route: '/create-message-image-pre-gemini', action: 'call-gemini-image', prompt: parts, hasReference: !!inlineImagePart })
+      const genResp = await app.service.gemini.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: parts
+      })
+      usageMeta = (genResp as any)?.usageMetadata
+      if (genResp?.candidates?.length) {
+        outer: for (const cand of genResp.candidates) {
+          const cparts = cand.content?.parts || []
+          for (const p of cparts) {
+            if (p.inlineData?.data && p.inlineData?.mimeType?.startsWith('image/')) {
+              generatedImageBase64 = p.inlineData.data
+              generatedMime = p.inlineData.mimeType
+              break outer
+            }
+          }
+        }
+      }
+      if (!generatedImageBase64) {
+        const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='100%' height='100%' fill='#222'/><text x='50%' y='45%' fill='#fff' font-size='38' dominant-baseline='middle' text-anchor='middle'>Gemini Image</text><text x='50%' y='55%' fill='#0f0' font-size='22' dominant-baseline='middle' text-anchor='middle'>${body.content.replace(/</g,'&lt;').substring(0,55)}</text></svg>`
+        generatedImageBase64 = Buffer.from(svg).toString('base64')
+        generatedMime = 'image/svg+xml'
+      }
+    } catch (e) {
+  app.logger.error(e)
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='100%' height='100%' fill='#440'/><text x='50%' y='50%' fill='#fff' font-size='38' dominant-baseline='middle' text-anchor='middle'>Gemini Error</text></svg>`
+      generatedImageBase64 = Buffer.from(svg).toString('base64')
+      generatedMime = 'image/svg+xml'
+    }
+
+    const ext = generatedMime.includes('svg') ? '.svg'
+      : generatedMime.includes('jpeg') ? '.jpg'
+      : generatedMime.includes('webp') ? '.webp'
+      : '.png'
+    const convertFileName = `File-Chat/${Date.now()}-gemini${ext}`
+    const file = app.service.client.file(convertFileName)
+    const buffer = Buffer.from(generatedImageBase64, 'base64')
+
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-generated-start', key: convertFileName })
+    await file.write(buffer, {
+      acl: 'public-read',
+      type: generatedMime
+    })
+    const uploadFile = app.service.getUrl + convertFileName
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'write-generated-success', key: convertFileName })
+
+    // Pricing per product sheet: input $0.30 / 1M tokens, output $0.039 per generated image (<=1024x1024 ~1290 tokens).
+    const USD_PER_M_INPUT = new Decimal(0.30)
+    const USD_PER_IMAGE_OUTPUT = new Decimal(0.039)
+    const promptTokens = new Decimal(usageMeta?.promptTokenCount || 0)
+    const rawOutputTokens = usageMeta?.candidatesTokenCount
+    const outputTokens = new Decimal(
+      typeof rawOutputTokens === 'number' && rawOutputTokens > 0 ? rawOutputTokens : (generatedImageBase64 ? 1290 : 0)
+    )
+
+    const usdInput = promptTokens.mul(USD_PER_M_INPUT).div(1_000_000)
+    const usdOutput = generatedImageBase64 ? USD_PER_IMAGE_OUTPUT : new Decimal(0)
+    const totalUsd = usdInput.add(usdOutput)
+    const creditCost = totalUsd.mul(5)
+
+    let messageCreated
+    if (body.file) {
+  messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
         contentUser: body.content,
         contentBot: uploadFile,
-        tookenRequest: completions.usage?.input_tokens,
-        tookendResponse: completions.usage?.output_tokens,
-        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        tookenRequest: promptTokens.toNumber(),
+        tookendResponse: outputTokens.toNumber(),
+        creditCost: creditCost.toNumber(),
         active: true,
         history: body.historyChat,
-        fileUser: uploadFileUser
+        fileUser: referenceImageUrl
       })
-    }
-    else {
+    } else {
       messageCreated = await MessageModel.create({
         user: user._id,
         bot: body.bot,
         contentUser: body.content,
         contentBot: uploadFile,
-        tookenRequest: completions.usage?.input_tokens,
-        tookendResponse: completions.usage?.output_tokens,
-        creditCost: creditCostDecimal.toNumber(), // Lưu giá trị creditCost dưới dạng number
+        tookenRequest: promptTokens.toNumber(),
+        tookendResponse: outputTokens.toNumber(),
+        creditCost: creditCost.toNumber(),
         active: true,
         history: body.historyChat
       })
     }
 
+    const creditUsedDecimal = new Decimal(user.creditUsed)
+    const updatedCreditUsed = creditUsedDecimal.add(creditCost)
 
-    // Cập nhật creditUsed của người dùng
-    const creditUsedDecimal = new Decimal(user.creditUsed);
-    const updatedCreditUsed = creditUsedDecimal.add(creditCostDecimal);
-
-    // Cập nhật số credit đã sử dụng của người dùng trong cơ sở dữ liệu
     await user.updateOne({
-      creditUsed: updatedCreditUsed.toNumber(), // Cập nhật với giá trị dạng number
+      creditUsed: updatedCreditUsed.toNumber(),
     })
-
-    let history
 
     if (!body.historyChat) {
       const historyCreate = await HistoryChat.create({
@@ -2608,16 +2639,15 @@ const controllerMessage = new Elysia()
       history = body.historyChat
     }
 
-    // Return message data
     const response = {
       contentBot: uploadFile,
       createdAt: messageCreated.createdAt,
       history: history,
       _id: messageCreated._id,
-      file: uploadFileUser,
-    };
+      file: referenceImageUrl,
+    }
 
-    app.logger.info({ route: '/create-message-image-pre-mobile', action: 'return', messageId: messageCreated._id })
+    app.logger.info({ route: '/create-message-image-pre-gemini', action: 'return', messageId: messageCreated._id })
     return response;
 
   }, {
